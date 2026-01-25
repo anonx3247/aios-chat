@@ -1,15 +1,18 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, createContext, useContext } from "react";
 import {
   AssistantRuntimeProvider,
   ThreadPrimitive,
   ComposerPrimitive,
   MessagePrimitive,
   useThreadRuntime,
+  useMessage,
 } from "@assistant-ui/react";
 import { ArrowUp, Sparkles, MessageCircle } from "lucide-react";
 import type { Thread } from "@app/types/thread";
 import { useChatRuntime } from "@app/hooks/useChatRuntime";
 import { Markdown } from "./Markdown";
+import { DynamicUI } from "./DynamicUI";
+import type { ToolInvocation } from "@app/types/message";
 
 // Store scroll positions per thread (persists across re-renders)
 const scrollPositions = new Map<string, number>();
@@ -122,8 +125,14 @@ function WelcomeScreen({ onStartChatWithMessage, onSelectThread, recentThreads }
   );
 }
 
+// Context for form submit handler
+const FormSubmitContext = createContext<((data: unknown) => void) | null>(null);
+function useFormSubmit() {
+  return useContext(FormSubmitContext);
+}
+
 export function ChatThread({ threadId, onTitleGenerated, onStartChatWithMessage, onSelectThread, recentThreads, initialMessage, onInitialMessageConsumed }: ChatThreadProps) {
-  const runtime = useChatRuntime({ threadId, onTitleGenerated, initialMessage, onInitialMessageConsumed });
+  const { runtime, handleFormSubmit } = useChatRuntime({ threadId, onTitleGenerated, initialMessage, onInitialMessageConsumed });
   const prevThreadIdRef = useRef<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -159,9 +168,11 @@ export function ChatThread({ threadId, onTitleGenerated, onStartChatWithMessage,
   }
 
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <ThreadContent scrollRef={setScrollRef} />
-    </AssistantRuntimeProvider>
+    <FormSubmitContext.Provider value={handleFormSubmit}>
+      <AssistantRuntimeProvider runtime={runtime}>
+        <ThreadContent scrollRef={setScrollRef} />
+      </AssistantRuntimeProvider>
+    </FormSubmitContext.Provider>
   );
 }
 
@@ -345,24 +356,50 @@ function UserMessage() {
 function AssistantMessage() {
   return (
     <MessagePrimitive.Root className="flex justify-start">
-      <div className="flex max-w-[85%] gap-3">
+      <div className="flex max-w-[85%] gap-3 overflow-hidden">
         <div
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full shadow-md"
           style={{ background: "var(--bg-tertiary)" }}
         >
           <Sparkles className="h-4 w-4" style={{ color: "var(--fg-accent)" }} />
         </div>
-        <div
-          className="rounded-2xl px-4 py-3 shadow-md"
-          style={{ background: "var(--bg-tertiary)", color: "var(--fg-primary)" }}
-        >
-          <MessagePrimitive.Content
-            components={{
-              Text: ({ text }) => <Markdown content={text} />,
-            }}
-          />
+        <div className="flex min-w-0 flex-1 flex-col gap-2 overflow-hidden">
+          <div
+            className="rounded-2xl px-4 py-3 shadow-md"
+            style={{ background: "var(--bg-tertiary)", color: "var(--fg-primary)" }}
+          >
+            <MessagePrimitive.Content
+              components={{
+                Text: ({ text }) => <Markdown content={text} />,
+              }}
+            />
+          </div>
+          <ToolInvocationsRenderer />
         </div>
       </div>
     </MessagePrimitive.Root>
+  );
+}
+
+function ToolInvocationsRenderer() {
+  const handleFormSubmit = useFormSubmit();
+  const message = useMessage();
+
+  // Get tool invocations from the current message's metadata
+  const custom = message.metadata.custom as { toolInvocations?: ToolInvocation[] } | undefined;
+  const toolInvocations = custom?.toolInvocations;
+
+  if (toolInvocations === undefined || toolInvocations.length === 0) return null;
+
+  return (
+    <>
+      {toolInvocations.map((invocation) => (
+        <DynamicUI
+          key={invocation.toolCallId}
+          toolInvocation={invocation}
+          {...(handleFormSubmit !== null ? { onSubmit: handleFormSubmit } : {})}
+        />
+      ))}
+    </>
   );
 }

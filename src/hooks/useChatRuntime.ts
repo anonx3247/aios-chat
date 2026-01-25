@@ -6,14 +6,23 @@ import {
 } from "@assistant-ui/react";
 import type { Message } from "@app/types/message";
 import { usePersistence } from "./usePersistence";
-import { getApiKey, streamChatResponse, generateConversationTitle } from "@app/lib/ai";
+import { getApiKey, streamChatResponse, generateConversationTitle, type ToolInvocation } from "@app/lib/ai";
 
-function convertToThreadMessage(message: Message): ThreadMessageLike {
+function convertToThreadMessage(message: Message, hideFromUI = false): ThreadMessageLike {
   return {
     id: message.id,
     role: message.role,
     content: message.content,
     createdAt: new Date(message.createdAt),
+    // Store tool invocations and hidden flag in metadata.custom for custom rendering
+    metadata: {
+      custom: {
+        ...(message.toolInvocations !== undefined && message.toolInvocations.length > 0
+          ? { toolInvocations: message.toolInvocations }
+          : {}),
+        ...(hideFromUI ? { hidden: true } : {}),
+      },
+    },
   };
 }
 
@@ -28,11 +37,12 @@ interface StreamingStore {
   content: string;
   isStreaming: boolean;
   isRunning: boolean;
+  toolInvocations: ToolInvocation[];
 }
 
 // Create a simple external store for streaming state
 function createStreamingStore() {
-  let state: StreamingStore = { content: "", isStreaming: false, isRunning: false };
+  let state: StreamingStore = { content: "", isStreaming: false, isRunning: false, toolInvocations: [] };
   const listeners = new Set<() => void>();
 
   return {
@@ -68,7 +78,7 @@ export function useChatRuntime({
     if (activeThreadIdRef.current !== threadId) {
       // Abort any ongoing streaming for the previous thread
       abortRef.current = true;
-      store.setState({ isRunning: false, isStreaming: false, content: "" });
+      store.setState({ isRunning: false, isStreaming: false, content: "", toolInvocations: [] });
       activeThreadIdRef.current = threadId;
     }
   }, [threadId, store]);
@@ -81,19 +91,27 @@ export function useChatRuntime({
   );
 
   // Build thread messages including streaming content
-  const threadMessages: ThreadMessageLike[] = messages.map(convertToThreadMessage);
-  // Show streaming message if we're streaming OR if we're running (thinking)
+  // Filter out hidden messages (form submissions sent to AI)
+  const FORM_SUBMISSION_PREFIX = "[Form submission]:";
+  const threadMessages: ThreadMessageLike[] = messages
+    .filter((m) => !m.content.startsWith(FORM_SUBMISSION_PREFIX))
+    .map((m) => convertToThreadMessage(m));
+
+  // Show streaming message with current tool invocations if we're running
   if (streamingState.isRunning) {
     threadMessages.push({
       id: "streaming",
       role: "assistant",
       content: streamingState.content,
       status: { type: "running" },
+      metadata: streamingState.toolInvocations.length > 0
+        ? { custom: { toolInvocations: streamingState.toolInvocations } }
+        : undefined,
     });
   }
 
   // Core function to send a message
-  const sendMessage = useCallback(
+  const sendMessageInternal = useCallback(
     async (textContent: string) => {
       if (threadId === null) return;
 
@@ -115,7 +133,7 @@ export function useChatRuntime({
       if (textContent.length === 0) return;
 
       // Set running immediately to show thinking indicator
-      store.setState({ isRunning: true, isStreaming: false, content: "" });
+      store.setState({ isRunning: true, isStreaming: false, content: "", toolInvocations: [] });
       abortRef.current = false;
 
       try {
@@ -136,15 +154,33 @@ export function useChatRuntime({
         // Now start streaming
         store.setState({ isStreaming: true });
 
-        // Stream the response - don't save to DB yet to avoid latency
+        // Stream the response with tool invocation callbacks
         let accumulated = "";
-        const fullResponse = await streamChatResponse(
+        const result = await streamChatResponse(
           chatHistory,
           (chunk) => {
             // Check if still on same thread and not aborted
             if (!abortRef.current && activeThreadIdRef.current === requestThreadId) {
               accumulated += chunk;
               store.setState({ content: accumulated });
+            }
+          },
+          (invocation) => {
+            // Update tool invocations as they come in
+            if (!abortRef.current && activeThreadIdRef.current === requestThreadId) {
+              const currentInvocations = store.getState().toolInvocations;
+              const existingIndex = currentInvocations.findIndex(
+                (i) => i.toolCallId === invocation.toolCallId
+              );
+              if (existingIndex >= 0) {
+                // Update existing invocation
+                const updated = [...currentInvocations];
+                updated[existingIndex] = invocation;
+                store.setState({ toolInvocations: updated });
+              } else {
+                // Add new invocation
+                store.setState({ toolInvocations: [...currentInvocations, invocation] });
+              }
             }
           }
         );
@@ -164,16 +200,20 @@ export function useChatRuntime({
           content: textContent,
         });
 
-        // Then save assistant response
-        await saveMessage({
+        // Then save assistant response (with tool invocations if any)
+        const assistantMessage: { role: "assistant"; content: string; toolInvocations?: ToolInvocation[] } = {
           role: "assistant",
-          content: fullResponse,
-        });
+          content: result.text,
+        };
+        if (result.toolInvocations.length > 0) {
+          assistantMessage.toolInvocations = result.toolInvocations;
+        }
+        await saveMessage(assistantMessage);
 
         // Generate AI title after first exchange
         if (isFirstMessage && onTitleGenerated !== undefined) {
           try {
-            const title = await generateConversationTitle(textContent, fullResponse);
+            const title = await generateConversationTitle(textContent, result.text);
             onTitleGenerated(title);
           } catch {
             // Fall back to first message if title generation fails
@@ -186,7 +226,7 @@ export function useChatRuntime({
       } catch (error) {
         // Only update state if still on same thread
         if (activeThreadIdRef.current === requestThreadId && !abortRef.current) {
-          store.setState({ isStreaming: false, content: "" });
+          store.setState({ isStreaming: false, content: "", toolInvocations: [] });
           const errorMessage =
             error instanceof Error ? error.message : "Unknown error occurred";
           await saveMessage({
@@ -205,6 +245,22 @@ export function useChatRuntime({
     [threadId, messages, saveMessage, refresh, onTitleGenerated, store]
   );
 
+  // Public send message function
+  const sendMessage = useCallback(
+    (textContent: string) => sendMessageInternal(textContent),
+    [sendMessageInternal]
+  );
+
+  // Handle form submissions from dynamic UI components
+  // These are filtered from UI display by their content prefix
+  const handleFormSubmit = useCallback(
+    (data: unknown) => {
+      const formattedData = `[Form submission]: ${JSON.stringify(data, null, 2)}`;
+      void sendMessageInternal(formattedData);
+    },
+    [sendMessageInternal]
+  );
+
   const onNew = useCallback(
     async (message: AppendMessage) => {
       // Extract text content from the message
@@ -220,7 +276,7 @@ export function useChatRuntime({
 
   const onCancel = useCallback((): Promise<void> => {
     abortRef.current = true;
-    store.setState({ isRunning: false, isStreaming: false, content: "" });
+    store.setState({ isRunning: false, isStreaming: false, content: "", toolInvocations: [] });
     return Promise.resolve();
   }, [store]);
 
@@ -239,11 +295,14 @@ export function useChatRuntime({
     }
   }, [initialMessage, threadId, sendMessage, onInitialMessageConsumed]);
 
-  return useExternalStoreRuntime({
+  // Return runtime plus form submit handler
+  const runtime = useExternalStoreRuntime({
     isRunning: streamingState.isRunning,
     messages: threadMessages,
     convertMessage: (msg: ThreadMessageLike) => msg,
     onNew,
     onCancel,
   });
+
+  return { runtime, handleFormSubmit, streamingToolInvocations: streamingState.toolInvocations };
 }

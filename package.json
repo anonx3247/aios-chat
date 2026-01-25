@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:node": "cd src-tauri/sidecars/node-backend && pnpm dev",
+    "dev:all": "concurrently \"pnpm dev:node\" \"pnpm tauri dev\"",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
@@ -13,13 +15,10 @@
     "test": "vitest"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^1.0.0",
-    "@ai-sdk/openai": "^1.0.0",
-    "@anthropic-ai/sdk": "^0.71.2",
     "@assistant-ui/react": "^0.10.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
-    "ai": "^4.0.0",
+    "dynamic-ui-mcp": "^0.1.0",
     "lucide-react": "^0.400.0",
     "prismjs": "^1.29.0",
     "react": "^19.1.0",
@@ -28,6 +27,7 @@
     "recharts": "^2.12.0",
     "rehype-highlight": "^7.0.2",
     "remark-gfm": "^4.0.1",
+    "sucrase": "^3.35.1",
     "zustand": "^5.0.0"
   },
   "devDependencies": {
@@ -38,6 +38,7 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "concurrently": "^9.2.1",
     "eslint": "^9.0.0",
     "eslint-plugin-react-hooks": "^5.0.0",
     "tailwindcss": "^4.0.0",

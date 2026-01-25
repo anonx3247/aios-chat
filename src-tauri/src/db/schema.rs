@@ -27,5 +27,20 @@ pub fn init(conn: &Connection) -> Result<()> {
     // Enable foreign key constraints
     conn.execute("PRAGMA foreign_keys = ON", [])?;
 
+    // Migration: add tool_invocations column if it doesn't exist
+    // SQLite doesn't have IF NOT EXISTS for ALTER TABLE, so we check first
+    let has_tool_invocations: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='tool_invocations'")?
+        .query_row([], |row| row.get::<_, i32>(0))
+        .map(|count| count > 0)
+        .unwrap_or(false);
+
+    if !has_tool_invocations {
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN tool_invocations TEXT",
+            [],
+        )?;
+    }
+
     Ok(())
 }

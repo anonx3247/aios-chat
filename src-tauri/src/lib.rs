@@ -22,6 +22,10 @@ pub fn run() {
             let database = Database::new(db_path)?;
             app.manage(database);
 
+            // Note: Node backend runs separately during development.
+            // For production, add sidecar spawning here.
+            // See: src-tauri/sidecars/node-backend/
+
             // Create a custom menu with standard text editing shortcuts (Cmd+A, Cmd+C, etc.)
             // but without shortcuts that conflict with our app (the default Edit menu has Cmd+F for Find)
             #[cfg(target_os = "macos")]
