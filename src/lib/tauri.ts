@@ -11,14 +11,14 @@ export async function listThreads(): Promise<Thread[]> {
 }
 
 export async function deleteThread(id: string): Promise<void> {
-  return invoke<void>("delete_thread", { id });
+  await invoke("delete_thread", { id });
 }
 
 export async function updateThreadTitle(
   id: string,
   title: string
 ): Promise<void> {
-  return invoke<void>("update_thread_title", { id, title });
+  await invoke("update_thread_title", { id, title });
 }
 
 export async function saveMessage(
