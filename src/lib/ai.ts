@@ -63,3 +63,30 @@ export async function streamChatResponse(
 
   return fullResponse;
 }
+
+export async function generateConversationTitle(
+  userMessage: string,
+  assistantResponse: string
+): Promise<string> {
+  const client = getAnthropicClient();
+
+  const response = await client.messages.create({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 50,
+    messages: [
+      {
+        role: "user",
+        content: `Generate a very short title (3-5 words max) for a conversation that starts with this exchange. Reply with ONLY the title, no quotes or punctuation.
+
+User: ${userMessage.slice(0, 200)}
+Assistant: ${assistantResponse.slice(0, 200)}`,
+      },
+    ],
+  });
+
+  const content = response.content[0];
+  if (content?.type === "text") {
+    return content.text.trim();
+  }
+  return "New conversation";
+}

@@ -10,6 +10,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Standalone Mode**: Works on any OS as an AI assistant browser
 - **Compositor Mode**: On Linux with aios-compositor, becomes the primary window manager UI
 
+## Development Environment
+
+This project uses Nix for development dependencies. Always run commands inside the Nix shell:
+
+```bash
+# Enter the Nix development shell first
+nix develop
+
+# All commands below should be run inside the Nix shell
+```
+
 ## Build Commands
 
 ```bash

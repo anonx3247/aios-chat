@@ -4,6 +4,7 @@ mod db;
 use std::fs;
 
 use db::Database;
+use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::Manager;
 
 /// # Panics
@@ -20,6 +21,40 @@ pub fn run() {
             let db_path = app_data_dir.join("chat.db");
             let database = Database::new(db_path)?;
             app.manage(database);
+
+            // Create a custom menu with standard text editing shortcuts (Cmd+A, Cmd+C, etc.)
+            // but without shortcuts that conflict with our app (the default Edit menu has Cmd+F for Find)
+            #[cfg(target_os = "macos")]
+            {
+                let app_submenu = SubmenuBuilder::new(app, "AIOS Chat")
+                    .about(None)
+                    .separator()
+                    .services()
+                    .separator()
+                    .hide()
+                    .hide_others()
+                    .show_all()
+                    .separator()
+                    .quit()
+                    .build()?;
+
+                // Add Edit menu with standard text editing shortcuts
+                let edit_submenu = SubmenuBuilder::new(app, "Edit")
+                    .undo()
+                    .redo()
+                    .separator()
+                    .cut()
+                    .copy()
+                    .paste()
+                    .select_all()
+                    .build()?;
+
+                let menu = MenuBuilder::new(app)
+                    .item(&app_submenu)
+                    .item(&edit_submenu)
+                    .build()?;
+                app.set_menu(menu)?;
+            }
 
             Ok(())
         })

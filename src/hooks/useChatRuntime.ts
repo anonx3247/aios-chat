@@ -1,5 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
-import { flushSync } from "react-dom";
+import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import {
   type AppendMessage,
   type ThreadMessageLike,
@@ -7,7 +6,7 @@ import {
 } from "@assistant-ui/react";
 import type { Message } from "@app/types/message";
 import { usePersistence } from "./usePersistence";
-import { getApiKey, streamChatResponse } from "@app/lib/ai";
+import { getApiKey, streamChatResponse, generateConversationTitle } from "@app/lib/ai";
 
 function convertToThreadMessage(message: Message): ThreadMessageLike {
   return {
@@ -21,42 +20,85 @@ function convertToThreadMessage(message: Message): ThreadMessageLike {
 interface UseChatRuntimeOptions {
   threadId: string | null;
   onTitleGenerated?: ((title: string) => void) | undefined;
+  initialMessage?: string | null | undefined;
+  onInitialMessageConsumed?: (() => void) | undefined;
 }
 
-interface StreamingState {
+interface StreamingStore {
   content: string;
   isStreaming: boolean;
+  isRunning: boolean;
+}
+
+// Create a simple external store for streaming state
+function createStreamingStore() {
+  let state: StreamingStore = { content: "", isStreaming: false, isRunning: false };
+  const listeners = new Set<() => void>();
+
+  return {
+    getState: () => state,
+    setState: (newState: Partial<StreamingStore>) => {
+      state = { ...state, ...newState };
+      listeners.forEach((listener) => { listener(); });
+    },
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+  };
 }
 
 export function useChatRuntime({
   threadId,
   onTitleGenerated,
+  initialMessage,
+  onInitialMessageConsumed,
 }: UseChatRuntimeOptions) {
   const { messages, saveMessage, refresh } = usePersistence(threadId);
-  const [isRunning, setIsRunning] = useState(false);
-  const [streaming, setStreaming] = useState<StreamingState>({
-    content: "",
-    isStreaming: false,
-  });
   const abortRef = useRef<boolean>(false);
+  const activeThreadIdRef = useRef<string | null>(null);
 
-  const threadMessages = useMemo(() => {
-    const converted = messages.map(convertToThreadMessage);
-    // Add streaming message if we're currently streaming
-    if (streaming.isStreaming) {
-      converted.push({
-        id: "streaming",
-        role: "assistant",
-        content: streaming.content,
-        status: { type: "running" },
-      });
+  // Use a ref to hold the store so it persists across renders
+  const storeRef = useRef<ReturnType<typeof createStreamingStore> | null>(null);
+  storeRef.current ??= createStreamingStore();
+  const store = storeRef.current;
+
+  // Reset streaming state when thread changes
+  useEffect(() => {
+    if (activeThreadIdRef.current !== threadId) {
+      // Abort any ongoing streaming for the previous thread
+      abortRef.current = true;
+      store.setState({ isRunning: false, isStreaming: false, content: "" });
+      activeThreadIdRef.current = threadId;
     }
-    return converted;
-  }, [messages, streaming]);
+  }, [threadId, store]);
 
-  const onNew = useCallback(
-    async (message: AppendMessage) => {
+  // Subscribe to store changes
+  const streamingState = useSyncExternalStore(
+    store.subscribe,
+    store.getState,
+    store.getState
+  );
+
+  // Build thread messages including streaming content
+  const threadMessages: ThreadMessageLike[] = messages.map(convertToThreadMessage);
+  // Show streaming message if we're streaming OR if we're running (thinking)
+  if (streamingState.isRunning) {
+    threadMessages.push({
+      id: "streaming",
+      role: "assistant",
+      content: streamingState.content,
+      status: { type: "running" },
+    });
+  }
+
+  // Core function to send a message
+  const sendMessage = useCallback(
+    async (textContent: string) => {
       if (threadId === null) return;
+
+      // Capture the thread ID at the start of the request
+      const requestThreadId = threadId;
 
       // Check for API key
       const apiKey = getApiKey();
@@ -70,92 +112,135 @@ export function useChatRuntime({
         return;
       }
 
+      if (textContent.length === 0) return;
+
+      // Set running immediately to show thinking indicator
+      store.setState({ isRunning: true, isStreaming: false, content: "" });
+      abortRef.current = false;
+
+      try {
+        // Check if we're still on the same thread
+        if (activeThreadIdRef.current !== requestThreadId) {
+          abortRef.current = true;
+          return;
+        }
+
+        const isFirstMessage = messages.length === 0;
+
+        // Prepare chat history for API (include the new user message)
+        const chatHistory = [
+          ...messages.map((m) => ({ role: m.role, content: m.content })),
+          { role: "user" as const, content: textContent },
+        ];
+
+        // Now start streaming
+        store.setState({ isStreaming: true });
+
+        // Stream the response - don't save to DB yet to avoid latency
+        let accumulated = "";
+        const fullResponse = await streamChatResponse(
+          chatHistory,
+          (chunk) => {
+            // Check if still on same thread and not aborted
+            if (!abortRef.current && activeThreadIdRef.current === requestThreadId) {
+              accumulated += chunk;
+              store.setState({ content: accumulated });
+            }
+          }
+        );
+
+        // Only save if still on the same thread
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- ref can be mutated asynchronously
+        if (activeThreadIdRef.current !== requestThreadId || abortRef.current) {
+          return;
+        }
+
+        // Now save both messages to DB after streaming is complete
+        store.setState({ isStreaming: false, content: "" });
+
+        // Save user message first
+        await saveMessage({
+          role: "user",
+          content: textContent,
+        });
+
+        // Then save assistant response
+        await saveMessage({
+          role: "assistant",
+          content: fullResponse,
+        });
+
+        // Generate AI title after first exchange
+        if (isFirstMessage && onTitleGenerated !== undefined) {
+          try {
+            const title = await generateConversationTitle(textContent, fullResponse);
+            onTitleGenerated(title);
+          } catch {
+            // Fall back to first message if title generation fails
+            const fallbackTitle = textContent.slice(0, 50) + (textContent.length > 50 ? "..." : "");
+            onTitleGenerated(fallbackTitle);
+          }
+        }
+
+        await refresh();
+      } catch (error) {
+        // Only update state if still on same thread
+        if (activeThreadIdRef.current === requestThreadId && !abortRef.current) {
+          store.setState({ isStreaming: false, content: "" });
+          const errorMessage =
+            error instanceof Error ? error.message : "Unknown error occurred";
+          await saveMessage({
+            role: "assistant",
+            content: `Error: ${errorMessage}`,
+          });
+          await refresh();
+        }
+      } finally {
+        // Only clear running if still on same thread
+        if (activeThreadIdRef.current === requestThreadId) {
+          store.setState({ isRunning: false });
+        }
+      }
+    },
+    [threadId, messages, saveMessage, refresh, onTitleGenerated, store]
+  );
+
+  const onNew = useCallback(
+    async (message: AppendMessage) => {
       // Extract text content from the message
       const textContent = message.content
         .filter((c): c is { type: "text"; text: string } => c.type === "text")
         .map((c) => c.text)
         .join("\n");
 
-      if (textContent.length === 0) return;
-
-      flushSync(() => {
-        setIsRunning(true);
-        setStreaming({ content: "", isStreaming: true });
-      });
-      abortRef.current = false;
-
-      try {
-        // Save user message
-        await saveMessage({
-          role: "user",
-          content: textContent,
-        });
-
-        // Generate title from first message if needed
-        if (messages.length === 0 && onTitleGenerated !== undefined) {
-          const title =
-            textContent.slice(0, 50) + (textContent.length > 50 ? "..." : "");
-          onTitleGenerated(title);
-        }
-
-        // Prepare chat history for API
-        const chatHistory = [
-          ...messages.map((m) => ({ role: m.role, content: m.content })),
-          { role: "user" as const, content: textContent },
-        ];
-
-        // Stream the response
-        let accumulated = "";
-        const fullResponse = await streamChatResponse(
-          chatHistory,
-          (chunk) => {
-            if (!abortRef.current) {
-              accumulated += chunk;
-              // Use flushSync to force immediate render
-              flushSync(() => {
-                setStreaming({ content: accumulated, isStreaming: true });
-              });
-            }
-          }
-        );
-
-        // Save the complete response
-        flushSync(() => {
-          setStreaming({ content: "", isStreaming: false });
-        });
-        await saveMessage({
-          role: "assistant",
-          content: fullResponse,
-        });
-
-        await refresh();
-      } catch (error) {
-        flushSync(() => {
-          setStreaming({ content: "", isStreaming: false });
-        });
-        const errorMessage =
-          error instanceof Error ? error.message : "Unknown error occurred";
-        await saveMessage({
-          role: "assistant",
-          content: `Error: ${errorMessage}`,
-        });
-        await refresh();
-      } finally {
-        setIsRunning(false);
-      }
+      await sendMessage(textContent);
     },
-    [threadId, messages, saveMessage, refresh, onTitleGenerated]
+    [sendMessage]
   );
 
   const onCancel = useCallback((): Promise<void> => {
     abortRef.current = true;
-    setIsRunning(false);
-    setStreaming({ content: "", isStreaming: false });
+    store.setState({ isRunning: false, isStreaming: false, content: "" });
     return Promise.resolve();
-  }, []);
+  }, [store]);
+
+  // Handle initial message from welcome screen
+  const initialMessageProcessedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      initialMessage !== null &&
+      initialMessage !== undefined &&
+      threadId !== null &&
+      initialMessageProcessedRef.current !== initialMessage
+    ) {
+      initialMessageProcessedRef.current = initialMessage;
+      void sendMessage(initialMessage);
+      onInitialMessageConsumed?.();
+    }
+  }, [initialMessage, threadId, sendMessage, onInitialMessageConsumed]);
 
   return useExternalStoreRuntime({
-    isRunning,
+    isRunning: streamingState.isRunning,
     messages: threadMessages,
     convertMessage: (msg: ThreadMessageLike) => msg,
     onNew,

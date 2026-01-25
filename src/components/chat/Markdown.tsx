@@ -39,7 +39,10 @@ const components: Components = {
     const isInline = className === undefined || className === "";
     if (isInline) {
       return (
-        <code className="rounded bg-zinc-700 px-1.5 py-0.5 font-mono text-sm text-pink-400">
+        <code
+          className="rounded px-1.5 py-0.5 font-mono text-sm"
+          style={{ background: "var(--bg-hover)", color: "var(--fg-accent)" }}
+        >
           {children}
         </code>
       );
@@ -50,14 +53,20 @@ const components: Components = {
     );
   },
   pre: ({ children }) => (
-    <pre className="mb-3 overflow-x-auto rounded-lg bg-zinc-950 p-4 font-mono text-sm last:mb-0">
+    <pre
+      className="mb-3 overflow-x-auto rounded-lg p-4 font-mono text-sm last:mb-0"
+      style={{ background: "var(--bg-secondary)" }}
+    >
       {children}
     </pre>
   ),
 
   // Blockquotes
   blockquote: ({ children }) => (
-    <blockquote className="mb-3 border-l-4 border-zinc-600 pl-4 italic text-zinc-400 last:mb-0">
+    <blockquote
+      className="mb-3 border-l-4 pl-4 italic last:mb-0"
+      style={{ borderColor: "var(--border-secondary)", color: "var(--fg-secondary)" }}
+    >
       {children}
     </blockquote>
   ),
@@ -68,7 +77,8 @@ const components: Components = {
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className="text-blue-400 underline decoration-blue-400/30 underline-offset-2 hover:decoration-blue-400"
+      className="underline underline-offset-2"
+      style={{ color: "var(--fg-accent)" }}
     >
       {children}
     </a>
@@ -81,11 +91,11 @@ const components: Components = {
     </div>
   ),
   thead: ({ children }) => (
-    <thead className="border-b border-zinc-700 bg-zinc-800/50">{children}</thead>
+    <thead className="border-b" style={{ borderColor: "var(--border-secondary)", background: "var(--bg-tertiary)" }}>{children}</thead>
   ),
   tbody: ({ children }) => <tbody>{children}</tbody>,
   tr: ({ children }) => (
-    <tr className="border-b border-zinc-800 last:border-0">{children}</tr>
+    <tr className="border-b last:border-0" style={{ borderColor: "var(--border-primary)" }}>{children}</tr>
   ),
   th: ({ children }) => (
     <th className="px-3 py-2 text-left text-sm font-semibold">{children}</th>
@@ -95,7 +105,7 @@ const components: Components = {
   ),
 
   // Horizontal rule
-  hr: () => <hr className="my-4 border-zinc-700" />,
+  hr: () => <hr className="my-4" style={{ borderColor: "var(--border-secondary)" }} />,
 
   // Strong and emphasis
   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,

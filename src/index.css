@@ -3,6 +3,29 @@
 :root {
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
+
+  /* Default theme (Warm Stone) - will be overridden by JS */
+  --bg-primary: #1c1917;
+  --bg-secondary: #0c0a09;
+  --bg-tertiary: #292524;
+  --bg-hover: #44403c;
+  --bg-active: #57534e;
+  --bg-input: #292524;
+  --bg-accent: #b45309;
+  --bg-accent-hover: #d97706;
+
+  --fg-primary: #fafaf9;
+  --fg-secondary: #a8a29e;
+  --fg-muted: #78716c;
+  --fg-accent: #fbbf24;
+
+  --border-primary: #292524;
+  --border-secondary: #44403c;
+
+  --highlight: rgba(180, 83, 9, 0.3);
+  --highlight-muted: rgba(180, 83, 9, 0.1);
+  --danger: #ef4444;
+  --success: #22c55e;
 }
 
 body {
@@ -10,4 +33,32 @@ body {
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background-color: var(--bg-primary);
+  color: var(--fg-primary);
+}
+
+/* Placeholder styles */
+input::placeholder,
+textarea::placeholder {
+  color: var(--fg-muted);
+}
+
+/* Assistant UI composer styles */
+.aui-composer-input::placeholder {
+  color: var(--fg-muted);
+}
+
+.aui-composer-send:disabled {
+  background: var(--bg-hover) !important;
+  color: var(--fg-muted);
+}
+
+.aui-composer-send:not(:disabled):hover {
+  background: var(--bg-accent-hover) !important;
+}
+
+/* Recent chat items hover */
+.recent-chat-item:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
 }

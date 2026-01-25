@@ -1,3 +1,4 @@
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   AssistantRuntimeProvider,
   ThreadPrimitive,
@@ -5,53 +6,240 @@ import {
   MessagePrimitive,
   useThreadRuntime,
 } from "@assistant-ui/react";
-import { Send } from "lucide-react";
+import { ArrowUp, Sparkles, MessageCircle } from "lucide-react";
+import type { Thread } from "@app/types/thread";
 import { useChatRuntime } from "@app/hooks/useChatRuntime";
 import { Markdown } from "./Markdown";
 
+// Store scroll positions per thread (persists across re-renders)
+const scrollPositions = new Map<string, number>();
+
 interface ChatThreadProps {
   threadId: string | null;
-  onTitleGenerated?: (title: string) => void;
+  onTitleGenerated?: ((title: string) => void) | undefined;
+  onStartChatWithMessage?: ((message: string) => void) | undefined;
+  onSelectThread?: ((id: string) => void) | undefined;
+  recentThreads?: Thread[] | undefined;
+  initialMessage?: string | null | undefined;
+  onInitialMessageConsumed?: (() => void) | undefined;
 }
 
-export function ChatThread({ threadId, onTitleGenerated }: ChatThreadProps) {
-  const runtime = useChatRuntime({ threadId, onTitleGenerated });
+function WelcomeScreen({ onStartChatWithMessage, onSelectThread, recentThreads }: {
+  onStartChatWithMessage?: ((message: string) => void) | undefined;
+  onSelectThread?: ((id: string) => void) | undefined;
+  recentThreads?: Thread[] | undefined;
+}) {
+  const threads = recentThreads ?? [];
+  const [time, setTime] = useState(new Date());
+  const [inputValue, setInputValue] = useState("");
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTime(new Date());
+    }, 1000);
+    return () => { clearInterval(timer); };
+  }, []);
+
+  const formatTime = (date: Date) => {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  };
+
+  const formatDate = (date: Date) => {
+    return date.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
+  };
+
+  const displayThreads = threads.slice(0, 4);
+
+  return (
+    <div className="flex h-full flex-col items-center justify-center px-4" style={{ background: "var(--bg-primary)" }}>
+      <div className="w-full max-w-lg text-center">
+        {/* Large Clock */}
+        <div className="mb-2 font-light tracking-tight" style={{ fontSize: "6rem", color: "var(--fg-primary)" }}>
+          {formatTime(time)}
+        </div>
+
+        {/* Date */}
+        <p className="mb-12 text-lg" style={{ color: "var(--fg-secondary)" }}>
+          {formatDate(time)}
+        </p>
+
+        {/* Input */}
+        <div className="mb-8">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (inputValue.trim().length > 0) {
+                onStartChatWithMessage?.(inputValue.trim());
+              }
+            }}
+            className="flex w-full items-center rounded-2xl border transition-colors"
+            style={{ borderColor: "var(--border-secondary)", background: "var(--bg-tertiary)" }}
+          >
+            <input
+              type="text"
+              value={inputValue}
+              onChange={(e) => { setInputValue(e.target.value); }}
+              placeholder="Start a new conversation..."
+              className="flex-1 bg-transparent px-4 py-4 focus:outline-none"
+              style={{ color: "var(--fg-primary)" }}
+              autoFocus
+            />
+            <button
+              type="submit"
+              disabled={inputValue.trim().length === 0}
+              className="m-2 flex h-8 w-8 items-center justify-center rounded-lg transition-colors disabled:opacity-50"
+              style={{ background: "var(--bg-hover)", color: "var(--fg-secondary)" }}
+            >
+              <ArrowUp className="h-4 w-4" />
+            </button>
+          </form>
+        </div>
+
+        {/* Recent Conversations */}
+        {displayThreads.length > 0 && (
+          <div className="text-left">
+            <p className="mb-3 text-xs font-medium uppercase tracking-wider" style={{ color: "var(--fg-muted)" }}>
+              Recent conversations
+            </p>
+            <div className="space-y-1">
+              {displayThreads.map((thread) => (
+                <button
+                  key={thread.id}
+                  type="button"
+                  onClick={() => { onSelectThread?.(thread.id); }}
+                  className="recent-chat-item flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors"
+                  style={{ color: "var(--fg-muted)" }}
+                >
+                  <MessageCircle className="h-4 w-4 shrink-0 opacity-50" />
+                  <span className="truncate">{thread.title ?? "New conversation"}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function ChatThread({ threadId, onTitleGenerated, onStartChatWithMessage, onSelectThread, recentThreads, initialMessage, onInitialMessageConsumed }: ChatThreadProps) {
+  const runtime = useChatRuntime({ threadId, onTitleGenerated, initialMessage, onInitialMessageConsumed });
+  const prevThreadIdRef = useRef<string | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Save scroll position when switching away from a thread
+  useEffect(() => {
+    const prevThreadId = prevThreadIdRef.current;
+    if (prevThreadId !== null && prevThreadId !== threadId && scrollContainerRef.current !== null) {
+      scrollPositions.set(prevThreadId, scrollContainerRef.current.scrollTop);
+    }
+    prevThreadIdRef.current = threadId;
+  }, [threadId]);
+
+  // Callback to set the scroll container ref
+  const setScrollRef = useCallback((el: HTMLDivElement | null) => {
+    scrollContainerRef.current = el;
+    // Restore scroll position when switching to a thread
+    if (el !== null && threadId !== null) {
+      const savedPosition = scrollPositions.get(threadId);
+      if (savedPosition !== undefined) {
+        el.scrollTop = savedPosition;
+      }
+    }
+  }, [threadId]);
 
   if (threadId === null) {
     return (
-      <div className="flex h-full items-center justify-center bg-zinc-900">
-        <div className="text-center">
-          <div className="mb-4 text-6xl">💬</div>
-          <h2 className="mb-2 text-xl font-semibold text-zinc-100">
-            Welcome to AIOS Chat
-          </h2>
-          <p className="text-zinc-500">
-            Click "New Chat" to start a conversation
-          </p>
-        </div>
-      </div>
+      <WelcomeScreen
+        onStartChatWithMessage={onStartChatWithMessage}
+        onSelectThread={onSelectThread}
+        recentThreads={recentThreads}
+      />
     );
   }
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <ThreadContent />
+      <ThreadContent scrollRef={setScrollRef} />
     </AssistantRuntimeProvider>
   );
 }
 
-function ThreadContent() {
+interface ThreadContentProps {
+  scrollRef: (el: HTMLDivElement | null) => void;
+}
+
+function ThreadContent({ scrollRef }: ThreadContentProps) {
+  const runtime = useThreadRuntime();
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const isNearBottomRef = useRef(true);
+
+  // Combined ref callback
+  const setScrollContainerRef = useCallback((el: HTMLDivElement | null) => {
+    scrollContainerRef.current = el;
+    scrollRef(el);
+  }, [scrollRef]);
+
+  // Track if user is near bottom (for auto-scroll)
+  const handleScroll = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (container === null) return;
+    const threshold = 100; // pixels from bottom
+    isNearBottomRef.current = container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
+  }, []);
+
+  // Auto-scroll when streaming (if user is near bottom)
+  useEffect(() => {
+    const state = runtime.getState();
+    if (!state.isRunning) return;
+
+    const scrollToBottom = () => {
+      const container = scrollContainerRef.current;
+      if (container !== null && isNearBottomRef.current) {
+        container.scrollTop = container.scrollHeight;
+      }
+    };
+
+    // Scroll immediately and set up interval for streaming
+    scrollToBottom();
+    const interval = setInterval(scrollToBottom, 100);
+    return () => { clearInterval(interval); };
+  }, [runtime]);
+
+  // Subscribe to runtime state changes for streaming
+  useEffect(() => {
+    const unsubscribe = runtime.subscribe(() => {
+      const state = runtime.getState();
+      if (state.isRunning && isNearBottomRef.current) {
+        const container = scrollContainerRef.current;
+        if (container !== null) {
+          container.scrollTop = container.scrollHeight;
+        }
+      }
+    });
+    return unsubscribe;
+  }, [runtime]);
+
   return (
-    <div className="flex h-full flex-col bg-zinc-900">
-      <ThreadPrimitive.Root className="flex-1 overflow-y-auto">
+    <div className="flex h-full flex-col" style={{ background: "var(--bg-primary)" }}>
+      <ThreadPrimitive.Root
+        className="flex-1 overflow-y-auto"
+        ref={setScrollContainerRef}
+        onScroll={handleScroll}
+      >
         <ThreadPrimitive.Viewport className="mx-auto flex max-w-3xl flex-col gap-6 px-4 py-8">
           <ThreadPrimitive.Empty>
             <div className="flex h-full flex-col items-center justify-center py-16">
-              <div className="mb-4 text-5xl">✨</div>
-              <h3 className="mb-2 text-lg font-medium text-zinc-100">
+              <div
+                className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl"
+                style={{ background: "var(--bg-tertiary)" }}
+              >
+                <Sparkles className="h-6 w-6" style={{ color: "var(--fg-muted)" }} />
+              </div>
+              <h3 className="mb-2 text-lg font-medium" style={{ color: "var(--fg-primary)" }}>
                 How can I help you today?
               </h3>
-              <p className="text-sm text-zinc-500">
+              <p className="text-sm" style={{ color: "var(--fg-muted)" }}>
                 Type a message below to get started
               </p>
             </div>
@@ -68,19 +256,29 @@ function ThreadContent() {
         </ThreadPrimitive.Viewport>
       </ThreadPrimitive.Root>
 
-      <div className="border-t border-zinc-800 bg-zinc-900/80 p-4 backdrop-blur">
+      <div
+        className="border-t p-4 backdrop-blur"
+        style={{ borderColor: "var(--border-primary)", background: "var(--bg-primary)" }}
+      >
         <div className="mx-auto max-w-3xl">
-          <ComposerPrimitive.Root className="relative flex items-end rounded-2xl border border-zinc-700 bg-zinc-800 shadow-lg transition-colors focus-within:border-zinc-600">
+          <ComposerPrimitive.Root
+            className="aui-composer relative flex items-end rounded-2xl border shadow-lg transition-colors"
+            style={{ borderColor: "var(--border-secondary)", background: "var(--bg-tertiary)" }}
+          >
             <ComposerPrimitive.Input
               placeholder="Message AIOS..."
-              className="min-h-[52px] flex-1 resize-none bg-transparent px-4 py-3 text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
+              className="aui-composer-input min-h-[52px] flex-1 resize-none bg-transparent px-4 py-3 focus:outline-none"
+              style={{ color: "var(--fg-primary)" }}
               autoFocus
             />
-            <ComposerPrimitive.Send className="m-2 flex h-9 w-9 items-center justify-center rounded-xl bg-blue-600 text-white transition-colors hover:bg-blue-500 disabled:bg-zinc-700 disabled:text-zinc-500">
-              <Send className="h-4 w-4" />
+            <ComposerPrimitive.Send
+              className="aui-composer-send m-2 flex h-9 w-9 items-center justify-center rounded-xl text-white transition-colors"
+              style={{ background: "var(--bg-accent)" }}
+            >
+              <ArrowUp className="h-4 w-4" />
             </ComposerPrimitive.Send>
           </ComposerPrimitive.Root>
-          <p className="mt-2 text-center text-xs text-zinc-600">
+          <p className="mt-2 text-center text-xs" style={{ color: "var(--fg-muted)" }}>
             AI can make mistakes. Consider checking important information.
           </p>
         </div>
@@ -105,16 +303,22 @@ function ThinkingIndicator() {
   return (
     <div className="flex justify-start">
       <div className="flex items-center gap-3">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-purple-500 to-pink-500 text-sm font-medium text-white shadow-md">
-          AI
+        <div
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full shadow-md"
+          style={{ background: "var(--bg-tertiary)" }}
+        >
+          <Sparkles className="h-4 w-4" style={{ color: "var(--fg-accent)" }} />
         </div>
-        <div className="flex items-center gap-2 rounded-2xl bg-zinc-800 px-4 py-3">
+        <div
+          className="flex items-center gap-2 rounded-2xl px-4 py-3"
+          style={{ background: "var(--bg-tertiary)" }}
+        >
           <div className="flex gap-1">
-            <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-500 [animation-delay:-0.3s]" />
-            <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-500 [animation-delay:-0.15s]" />
-            <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-500" />
+            <span className="h-2 w-2 animate-bounce rounded-full [animation-delay:-0.3s]" style={{ background: "var(--fg-muted)" }} />
+            <span className="h-2 w-2 animate-bounce rounded-full [animation-delay:-0.15s]" style={{ background: "var(--fg-muted)" }} />
+            <span className="h-2 w-2 animate-bounce rounded-full" style={{ background: "var(--fg-muted)" }} />
           </div>
-          <span className="text-sm text-zinc-500">Thinking...</span>
+          <span className="text-sm" style={{ color: "var(--fg-muted)" }}>Thinking...</span>
         </div>
       </div>
     </div>
@@ -124,7 +328,10 @@ function ThinkingIndicator() {
 function UserMessage() {
   return (
     <MessagePrimitive.Root className="flex justify-end">
-      <div className="max-w-[85%] rounded-2xl bg-blue-600 px-4 py-3 text-white shadow-md">
+      <div
+        className="max-w-[85%] rounded-2xl px-4 py-3 shadow-md"
+        style={{ background: "var(--bg-hover)", color: "var(--fg-primary)" }}
+      >
         <MessagePrimitive.Content
           components={{
             Text: ({ text }) => <Markdown content={text} />,
@@ -139,10 +346,16 @@ function AssistantMessage() {
   return (
     <MessagePrimitive.Root className="flex justify-start">
       <div className="flex max-w-[85%] gap-3">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-purple-500 to-pink-500 text-sm font-medium text-white shadow-md">
-          AI
+        <div
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full shadow-md"
+          style={{ background: "var(--bg-tertiary)" }}
+        >
+          <Sparkles className="h-4 w-4" style={{ color: "var(--fg-accent)" }} />
         </div>
-        <div className="rounded-2xl bg-zinc-800 px-4 py-3 text-zinc-100 shadow-md">
+        <div
+          className="rounded-2xl px-4 py-3 shadow-md"
+          style={{ background: "var(--bg-tertiary)", color: "var(--fg-primary)" }}
+        >
           <MessagePrimitive.Content
             components={{
               Text: ({ text }) => <Markdown content={text} />,
