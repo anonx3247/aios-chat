@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { X, Key, Shield } from "lucide-react";
-import { getApiKey, setApiKey } from "@app/lib/ai";
+import { X, Key, Shield, Search } from "lucide-react";
+import { getApiKey, setApiKey, getPerplexityApiKey, setPerplexityApiKey } from "@app/lib/ai";
 import { Modal } from "@app/components/ui/Modal";
 
 interface SettingsModalProps {
@@ -9,18 +9,21 @@ interface SettingsModalProps {
 }
 
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
-  const [key, setKey] = useState("");
+  const [anthropicKey, setAnthropicKey] = useState("");
+  const [perplexityKey, setPerplexityKey] = useState("");
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
-      setKey(getApiKey() ?? "");
+      setAnthropicKey(getApiKey() ?? "");
+      setPerplexityKey(getPerplexityApiKey() ?? "");
       setSaved(false);
     }
   }, [isOpen]);
 
   const handleSave = () => {
-    setApiKey(key);
+    setApiKey(anthropicKey);
+    setPerplexityApiKey(perplexityKey);
     setSaved(true);
     setTimeout(() => {
       onClose();
@@ -52,20 +55,22 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         </div>
 
         <div className="space-y-6">
+          {/* Anthropic API Key */}
           <div>
             <label
-              htmlFor="api-key"
-              className="mb-2 block text-sm font-medium"
+              htmlFor="anthropic-key"
+              className="mb-2 flex items-center gap-2 text-sm font-medium"
               style={{ color: "var(--fg-secondary)" }}
             >
+              <Key className="h-4 w-4" style={{ color: "var(--fg-accent)" }} />
               Anthropic API Key
             </label>
             <div className="relative">
               <input
-                id="api-key"
+                id="anthropic-key"
                 type="password"
-                value={key}
-                onChange={(e) => { setKey(e.target.value); }}
+                value={anthropicKey}
+                onChange={(e) => { setAnthropicKey(e.target.value); }}
                 placeholder="sk-ant-api03-..."
                 className="w-full rounded-xl border px-4 py-3 transition-colors focus:outline-none focus:ring-2"
                 style={{
@@ -75,17 +80,47 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 }}
               />
             </div>
-            <div
-              className="mt-3 flex items-start gap-2 rounded-lg p-3"
-              style={{ background: "var(--bg-tertiary)" }}
+          </div>
+
+          {/* Perplexity API Key */}
+          <div>
+            <label
+              htmlFor="perplexity-key"
+              className="mb-2 flex items-center gap-2 text-sm font-medium"
+              style={{ color: "var(--fg-secondary)" }}
             >
-              <Shield className="mt-0.5 h-4 w-4 shrink-0" style={{ color: "var(--success)" }} />
-              <p className="text-xs" style={{ color: "var(--fg-muted)" }}>
-                Your API key is stored locally on your device and is only sent
-                directly to Anthropic's servers. It is never shared with any
-                third parties.
-              </p>
+              <Search className="h-4 w-4" style={{ color: "var(--fg-accent)" }} />
+              Perplexity API Key
+              <span className="text-xs" style={{ color: "var(--fg-muted)" }}>(for web search)</span>
+            </label>
+            <div className="relative">
+              <input
+                id="perplexity-key"
+                type="password"
+                value={perplexityKey}
+                onChange={(e) => { setPerplexityKey(e.target.value); }}
+                placeholder="pplx-..."
+                className="w-full rounded-xl border px-4 py-3 transition-colors focus:outline-none focus:ring-2"
+                style={{
+                  background: "var(--bg-input)",
+                  borderColor: "var(--border-secondary)",
+                  color: "var(--fg-primary)",
+                }}
+              />
             </div>
+          </div>
+
+          {/* Security note */}
+          <div
+            className="flex items-start gap-2 rounded-lg p-3"
+            style={{ background: "var(--bg-tertiary)" }}
+          >
+            <Shield className="mt-0.5 h-4 w-4 shrink-0" style={{ color: "var(--success)" }} />
+            <p className="text-xs" style={{ color: "var(--fg-muted)" }}>
+              Your API keys are stored locally on your device and are only sent
+              directly to their respective servers. They are never shared with any
+              third parties.
+            </p>
           </div>
 
           <div className="flex justify-end gap-3 pt-2">

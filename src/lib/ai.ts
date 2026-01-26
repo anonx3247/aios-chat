@@ -12,13 +12,22 @@ export type { ToolInvocation };
 // Node backend URL - configurable for development vs production
 const NODE_BACKEND_URL = "http://localhost:3001";
 
-// API key storage
+// API key storage - Anthropic
 export function setApiKey(key: string): void {
   localStorage.setItem("anthropic_api_key", key);
 }
 
 export function getApiKey(): string | null {
   return localStorage.getItem("anthropic_api_key");
+}
+
+// API key storage - Perplexity
+export function setPerplexityApiKey(key: string): void {
+  localStorage.setItem("perplexity_api_key", key);
+}
+
+export function getPerplexityApiKey(): string | null {
+  return localStorage.getItem("perplexity_api_key");
 }
 
 export interface ChatMessage {
@@ -113,6 +122,8 @@ export async function streamChatResponse(
     throw new Error("API key not set. Please add it in settings.");
   }
 
+  const perplexityApiKey = getPerplexityApiKey();
+
   const response = await fetch(`${NODE_BACKEND_URL}/api/chat`, {
     method: "POST",
     headers: {
@@ -121,6 +132,7 @@ export async function streamChatResponse(
     body: JSON.stringify({
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
       apiKey,
+      perplexityApiKey,
       enableTools,
     }),
   });

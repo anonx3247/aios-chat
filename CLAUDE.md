@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**aios-chat-browser** - A cross-platform AI-powered browser and chat interface using Tauri 2.0 (Rust backend + React/TypeScript frontend). Provides a chat-based interface to an AI assistant that can control the computer, search the web, execute code, and render dynamic UIs.
+**aios-chat-browser** - A cross-platform AI-powered browser and chat interface using Tauri 2.0 (Rust backend + React/TypeScript frontend + Node.js sidecar). Provides a chat-based interface to an AI assistant that can control the computer, search the web, execute code, and render dynamic UIs.
 
 **Operating Modes:**
 - **Standalone Mode**: Works on any OS as an AI assistant browser
@@ -15,99 +15,119 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This project uses Nix for development dependencies. Always run commands inside the Nix shell:
 
 ```bash
-# Enter the Nix development shell first
-nix develop
+# Run commands with nix-shell
+nix-shell --run "pnpm install"
+nix-shell --run "pnpm tauri dev"
 
-# All commands below should be run inside the Nix shell
+# Or enter the shell interactively
+nix-shell
 ```
 
 ## Build Commands
 
 ```bash
-# Install dependencies
-pnpm install
+# Install dependencies (run from project root)
+nix-shell --run "pnpm install"
 
-# Development (runs both frontend and backend)
-pnpm tauri dev
+# Install node-backend dependencies
+nix-shell --run "cd src-tauri/sidecars/node-backend && pnpm install"
+
+# Development - run BOTH of these in separate terminals:
+nix-shell --run "pnpm dev:node"   # Terminal 1: Node backend on port 3001
+nix-shell --run "pnpm tauri dev"  # Terminal 2: Tauri app
+
+# Or use concurrently (may have output issues):
+nix-shell --run "pnpm dev:all"
 
 # Build production binary
-pnpm tauri build
+nix-shell --run "pnpm tauri build"
 
 # Frontend only (Vite dev server)
-pnpm dev
+nix-shell --run "pnpm dev"
 
 # Type checking
-pnpm typecheck
+nix-shell --run "pnpm typecheck"
 
 # Linting
-pnpm lint
+nix-shell --run "pnpm lint"
 
 # Run tests
-pnpm test
+nix-shell --run "pnpm test"
 
-# Run single test file
-pnpm test -- path/to/test.ts
-
-# Rust backend commands (from src-tauri/)
-cargo build
-cargo test
-cargo clippy
-cargo fmt --check
+# Rust backend commands
+nix-shell --run "cd src-tauri && cargo build"
+nix-shell --run "cd src-tauri && cargo clippy"
 ```
 
 ## Architecture
 
-### Two-Layer Design
+### Three-Layer Design
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Frontend (React/TS)                       │
+│  - Chat UI with @assistant-ui/react                         │
+│  - Dynamic UI rendering (dynamic-ui-mcp/react)              │
+│  - Theme system with CSS variables                           │
+│  - Calls Node backend via HTTP (localhost:3001)              │
+└────────────────────────┬────────────────────────────────────┘
+                         │ HTTP
+┌────────────────────────▼────────────────────────────────────┐
+│                 Node Backend (Hono server)                   │
+│  - AI SDK streaming (Anthropic, OpenAI, etc.)               │
+│  - MCP server connections                                    │
+│  - dynamic-ui-mcp/tools (requires Node.js fs)               │
+│  - Runs on localhost:3001                                    │
+└─────────────────────────────────────────────────────────────┘
+                         │ IPC (Tauri commands)
+┌────────────────────────▼────────────────────────────────────┐
+│               Tauri Backend (Rust)                           │
+│  - SQLite persistence (threads, messages)                    │
+│  - Native OS features (screenshots, file access)             │
+│  - Window management                                         │
+└─────────────────────────────────────────────────────────────┘
+```
 
 **Frontend (React/TypeScript in `src/`):**
 - Chat interface with streaming AI responses
-- Vertical tab bar (web pages, chat sessions, apps in compositor mode)
-- WebView manager for browser functionality
 - Dynamic UI renderer (renders components from dynamic-ui-mcp)
+- Theme system with multiple color schemes
 - Zustand stores for state management
 
-**Backend (Rust/Tauri in `src-tauri/`):**
-- MCP client manager - discovers and connects to MCP servers
-- AI provider integration - Anthropic API with SSE streaming
-- Screenshot capture - platform-specific, sent as context to AI
-- Tab and window state management
+**Node Backend (in `src-tauri/sidecars/node-backend/`):**
+- AI SDK integration (Anthropic, OpenAI via Vercel AI SDK)
+- MCP server connections (dynamic-ui-mcp, perplexity, sandbox, etc.)
+- Hono server on localhost:3001
+- Will be bundled as Tauri sidecar in production
+
+**Tauri Backend (Rust in `src-tauri/`):**
+- SQLite database for chat persistence
+- Native capabilities (screenshots, file access)
 - Tauri commands exposed to frontend via IPC
-
-### MCP (Model Context Protocol) Integration
-
-The app connects to multiple MCP servers:
-- `dynamic-ui-mcp` - Renders dynamic React components in chat
-- `@modelcontextprotocol/server-perplexity` - Web search
-- `@anthropic/sandbox` - Code execution in isolated containers
-- System-specific servers: `aios-shell-exec`, `aios-nix-manager`, `aios-window-mgmt`
-
-MCP servers are configured in `~/.config/aios-chat-browser/mcp-servers.toml`.
 
 ### Key Data Flows
 
 **Chat message flow:**
-1. User sends message → Tauri command `send_chat_message`
-2. Backend captures screenshot of active tab
-3. Backend builds context (messages + screenshot as base64)
-4. Streams request to Anthropic API with available MCP tools
-5. Response chunks streamed to frontend via Tauri events
-6. If AI calls tool → backend invokes MCP server → result fed back to AI
+1. User sends message → Frontend
+2. Frontend calls Node backend HTTP API (/api/chat)
+3. Node backend streams to AI provider with tools
+4. If AI uses renderCustom tool → returns component source
+5. Frontend receives stream, renders text + dynamic components
+6. Frontend saves to Tauri SQLite via IPC
 
 **Dynamic UI rendering:**
-1. AI calls `dynamic-ui-mcp` tool with component spec
-2. MCP server returns instance_id
-3. Backend emits event to frontend
-4. Frontend dynamically imports React component from `dynamic-ui-mcp` package
+1. AI calls `renderCustom` tool with TSX source
+2. Node backend returns component source in tool result
+3. Frontend receives tool invocation
+4. DynamicUIRenderer compiles and renders component
+5. Component has access to React, Recharts, Prism, theme
 
-### Tab Types
+### MCP Integration
 
-```rust
-enum TabType {
-    Web { url: String, webview_id: String },
-    Chat { session_id: String },
-    App { app_name: String, window_id: Option<String> }, // compositor mode only
-}
-```
+The Node backend connects to MCP servers:
+- `dynamic-ui-mcp` - Renders dynamic React components in chat
+- `@modelcontextprotocol/server-perplexity` - Web search (planned)
+- `@anthropic/sandbox` - Code execution (planned)
 
 ## TypeScript Conventions
 
@@ -122,13 +142,12 @@ enum TabType {
 - Use `anyhow::Result` for error handling in commands
 - Use `thiserror` for custom error types
 - Async with `tokio` runtime
-- MCP transports: stdio for local servers, HTTP/WebSocket for remote
 
-## Configuration Files
+## Configuration
 
-- `~/.config/aios-chat-browser/mcp-servers.toml` - MCP server configuration
-- `~/.config/aios-chat-browser/settings.toml` - App settings (theme, AI model, etc.)
-- API keys read from environment variables (e.g., `ANTHROPIC_API_KEY`, `PERPLEXITY_API_KEY`)
+- API keys stored in localStorage (frontend)
+- Theme stored in localStorage (frontend)
+- Chat history in SQLite (Tauri data dir)
 
 ## New Repository Status
 
@@ -136,4 +155,3 @@ This is a new repository. Follow these principles:
 - Set up comprehensive linting from the start
 - Keep boilerplate minimal
 - Never over-engineer - build only what's needed now
-- Use TDD workflow: write tests before implementation
