@@ -7,6 +7,7 @@ interface UsePersistenceResult {
   isLoading: boolean;
   error: string | null;
   saveMessage: (message: NewMessage) => Promise<Message>;
+  deleteMessage: (messageId: string) => Promise<void>;
   refresh: () => Promise<void>;
 }
 
@@ -49,11 +50,20 @@ export function usePersistence(threadId: string | null): UsePersistenceResult {
     [threadId]
   );
 
+  const deleteMessage = useCallback(
+    async (messageId: string) => {
+      await tauri.deleteMessage(messageId);
+      setMessages((prev) => prev.filter((m) => m.id !== messageId));
+    },
+    []
+  );
+
   return {
     messages,
     isLoading,
     error,
     saveMessage,
+    deleteMessage,
     refresh,
   };
 }

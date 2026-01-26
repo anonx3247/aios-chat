@@ -80,6 +80,11 @@ pub fn get_messages(conn: &Connection, thread_id: &str) -> Result<Vec<Message>> 
     Ok(messages)
 }
 
+pub fn delete_message(conn: &Connection, message_id: &str) -> Result<()> {
+    conn.execute("DELETE FROM messages WHERE id = ?1", params![message_id])?;
+    Ok(())
+}
+
 #[allow(dead_code)]
 pub fn delete_messages_by_thread(conn: &Connection, thread_id: &str) -> Result<()> {
     conn.execute(

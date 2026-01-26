@@ -1,4 +1,4 @@
-import { MessageSquarePlus, Trash2, MessageCircle, ChevronLeft } from "lucide-react";
+import { MessageSquarePlus, Trash2, MessageCircle, ChevronLeft, Settings } from "lucide-react";
 import type { Thread } from "@app/types/thread";
 
 interface SidebarProps {
@@ -11,6 +11,7 @@ interface SidebarProps {
   onDeleteThread: (id: string) => void;
   onToggleCollapse: () => void;
   onMouseLeave?: (() => void) | undefined;
+  onOpenSettings: () => void;
 }
 
 export function Sidebar({
@@ -23,6 +24,7 @@ export function Sidebar({
   onDeleteThread,
   onToggleCollapse,
   onMouseLeave,
+  onOpenSettings,
 }: SidebarProps) {
   return (
     <aside
@@ -90,6 +92,18 @@ export function Sidebar({
         )}
       </div>
 
+      {/* Settings at bottom */}
+      <div className="border-t p-3" style={{ borderColor: "var(--border-primary)" }}>
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className="flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-sm transition-colors"
+          style={{ color: "var(--fg-muted)" }}
+        >
+          <Settings className="h-4 w-4" />
+          <span>Settings</span>
+        </button>
+      </div>
     </aside>
   );
 }
@@ -113,10 +127,12 @@ function ThreadListItem({
   };
 
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onSelect}
-      className="group flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left text-sm transition-all"
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onSelect(); }}
+      className="group flex w-full cursor-pointer items-center justify-between rounded-xl px-3 py-2.5 text-left text-sm transition-all"
       style={{
         background: isActive ? "var(--bg-tertiary)" : "transparent",
         color: isActive ? "var(--fg-primary)" : "var(--fg-muted)",
@@ -137,6 +153,6 @@ function ThreadListItem({
       >
         <Trash2 className="h-3.5 w-3.5" />
       </button>
-    </button>
+    </div>
   );
 }

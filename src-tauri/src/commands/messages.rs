@@ -21,3 +21,11 @@ pub fn get_messages(app: AppHandle, thread_id: String) -> Result<Vec<Message>, S
     let conn = db.conn();
     db::messages::get_messages(&conn, &thread_id).map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn delete_message(app: AppHandle, message_id: String) -> Result<(), String> {
+    let db = db::get_db(&app);
+    let conn = db.conn();
+    db::messages::delete_message(&conn, &message_id).map_err(|e| e.to_string())
+}

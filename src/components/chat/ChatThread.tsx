@@ -7,11 +7,12 @@ import {
   useThreadRuntime,
   useMessage,
 } from "@assistant-ui/react";
-import { ArrowUp, Sparkles, MessageCircle } from "lucide-react";
+import { ArrowUp, Sparkles, MessageCircle, RotateCcw } from "lucide-react";
 import type { Thread } from "@app/types/thread";
 import { useChatRuntime } from "@app/hooks/useChatRuntime";
 import { Markdown } from "./Markdown";
-import { DynamicUI } from "./DynamicUI";
+import { ToolDisplay } from "./ToolDisplay";
+import { AskUserQuestion, type AskUserQuestionArgs } from "./AskUserQuestion";
 import type { ToolInvocation } from "@app/types/message";
 
 // Store scroll positions per thread (persists across re-renders)
@@ -125,14 +126,20 @@ function WelcomeScreen({ onStartChatWithMessage, onSelectThread, recentThreads }
   );
 }
 
-// Context for form submit handler
-const FormSubmitContext = createContext<((data: unknown) => void) | null>(null);
-function useFormSubmit() {
-  return useContext(FormSubmitContext);
+// Context for pending ask_user question and regenerate
+interface ChatContext {
+  pendingAskUser: { toolCallId: string; args: AskUserQuestionArgs } | null;
+  onAskUserSubmit: (response: unknown) => void | Promise<void>;
+  onAskUserCancel: () => void | Promise<void>;
+  onRegenerate: () => void | Promise<void>;
+}
+const ChatContextProvider = createContext<ChatContext | null>(null);
+function useChatContext() {
+  return useContext(ChatContextProvider);
 }
 
 export function ChatThread({ threadId, onTitleGenerated, onStartChatWithMessage, onSelectThread, recentThreads, initialMessage, onInitialMessageConsumed }: ChatThreadProps) {
-  const { runtime, handleFormSubmit } = useChatRuntime({ threadId, onTitleGenerated, initialMessage, onInitialMessageConsumed });
+  const { runtime, pendingAskUser, handleAskUserSubmit, handleAskUserCancel, regenerateLastMessage } = useChatRuntime({ threadId, onTitleGenerated, initialMessage, onInitialMessageConsumed });
   const prevThreadIdRef = useRef<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -167,12 +174,19 @@ export function ChatThread({ threadId, onTitleGenerated, onStartChatWithMessage,
     );
   }
 
+  const chatContextValue: ChatContext = {
+    pendingAskUser,
+    onAskUserSubmit: handleAskUserSubmit,
+    onAskUserCancel: handleAskUserCancel,
+    onRegenerate: regenerateLastMessage,
+  };
+
   return (
-    <FormSubmitContext.Provider value={handleFormSubmit}>
+    <ChatContextProvider.Provider value={chatContextValue}>
       <AssistantRuntimeProvider runtime={runtime}>
         <ThreadContent scrollRef={setScrollRef} />
       </AssistantRuntimeProvider>
-    </FormSubmitContext.Provider>
+    </ChatContextProvider.Provider>
   );
 }
 
@@ -182,6 +196,7 @@ interface ThreadContentProps {
 
 function ThreadContent({ scrollRef }: ThreadContentProps) {
   const runtime = useThreadRuntime();
+  const chatContext = useChatContext();
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const isNearBottomRef = useRef(true);
 
@@ -255,6 +270,10 @@ function ThreadContent({ scrollRef }: ThreadContentProps) {
               </p>
             </div>
           </ThreadPrimitive.Empty>
+          {/* Show current time when there are messages */}
+          <ThreadPrimitive.If empty={false}>
+            <CurrentTimeHeader />
+          </ThreadPrimitive.If>
           <ThreadPrimitive.Messages
             components={{
               UserMessage: UserMessage,
@@ -272,6 +291,16 @@ function ThreadContent({ scrollRef }: ThreadContentProps) {
         style={{ borderColor: "var(--border-primary)", background: "var(--bg-primary)" }}
       >
         <div className="mx-auto max-w-3xl">
+          {/* AskUserQuestion inline UI */}
+          {chatContext?.pendingAskUser !== null && chatContext?.pendingAskUser !== undefined && (
+            <div className="mb-3">
+              <AskUserQuestion
+                args={chatContext.pendingAskUser.args}
+                onSubmit={chatContext.onAskUserSubmit}
+                onCancel={chatContext.onAskUserCancel}
+              />
+            </div>
+          )}
           <ComposerPrimitive.Root
             className="aui-composer relative flex items-end rounded-2xl border shadow-lg transition-colors"
             style={{ borderColor: "var(--border-secondary)", background: "var(--bg-tertiary)" }}
@@ -294,6 +323,23 @@ function ThreadContent({ scrollRef }: ThreadContentProps) {
           </p>
         </div>
       </div>
+    </div>
+  );
+}
+
+function CurrentTimeHeader() {
+  const [time, setTime] = useState(new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => { setTime(new Date()); }, 1000);
+    return () => { clearInterval(timer); };
+  }, []);
+
+  return (
+    <div className="flex justify-center pb-4">
+      <span className="text-sm font-light" style={{ color: "var(--fg-muted)" }}>
+        {time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+      </span>
     </div>
   );
 }
@@ -354,8 +400,37 @@ function UserMessage() {
 }
 
 function AssistantMessage() {
+  const message = useMessage();
+  const runtime = useThreadRuntime();
+  const chatContext = useChatContext();
+
+  // Check if message has actual text content
+  const hasTextContent = message.content.some(
+    (part) => part.type === "text" && part.text.trim().length > 0
+  );
+
+  // Check if message has tool invocations
+  const custom = message.metadata.custom as { toolInvocations?: ToolInvocation[] } | undefined;
+  const hasToolInvocations = (custom?.toolInvocations?.length ?? 0) > 0;
+
+  // Don't render anything if there's no content and no tools (thinking state handled by ThinkingIndicator)
+  if (!hasTextContent && !hasToolInvocations) {
+    return null;
+  }
+
+  // Check if this is the last assistant message (for showing regenerate button)
+  const state = runtime.getState();
+  const isLastAssistant = (() => {
+    const assistantMessages = state.messages.filter((m) => m.role === "assistant");
+    if (assistantMessages.length === 0) return false;
+    const lastAssistant = assistantMessages[assistantMessages.length - 1];
+    return lastAssistant?.id === message.id;
+  })();
+
+  const canRegenerate = isLastAssistant && !state.isRunning && chatContext?.onRegenerate !== undefined;
+
   return (
-    <MessagePrimitive.Root className="flex justify-start">
+    <MessagePrimitive.Root className="group flex justify-start">
       <div className="flex max-w-[85%] gap-3 overflow-hidden">
         <div
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full shadow-md"
@@ -364,17 +439,35 @@ function AssistantMessage() {
           <Sparkles className="h-4 w-4" style={{ color: "var(--fg-accent)" }} />
         </div>
         <div className="flex min-w-0 flex-1 flex-col gap-2 overflow-hidden">
-          <div
-            className="rounded-2xl px-4 py-3 shadow-md"
-            style={{ background: "var(--bg-tertiary)", color: "var(--fg-primary)" }}
-          >
-            <MessagePrimitive.Content
-              components={{
-                Text: ({ text }) => <Markdown content={text} />,
-              }}
-            />
-          </div>
+          {/* Only show text bubble if there's actual content */}
+          {hasTextContent && (
+            <div
+              className="rounded-2xl px-4 py-3 shadow-md"
+              style={{ background: "var(--bg-tertiary)", color: "var(--fg-primary)" }}
+            >
+              <MessagePrimitive.Content
+                components={{
+                  Text: ({ text }) => <Markdown content={text} />,
+                }}
+              />
+            </div>
+          )}
           <ToolInvocationsRenderer />
+          {/* Regenerate button - only shown on last assistant message when not running */}
+          {canRegenerate && (
+            <div className="flex opacity-0 transition-opacity group-hover:opacity-100">
+              <button
+                type="button"
+                onClick={() => { void chatContext.onRegenerate(); }}
+                className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs transition-colors"
+                style={{ color: "var(--fg-muted)" }}
+                title="Regenerate response"
+              >
+                <RotateCcw className="h-3 w-3" />
+                Regenerate
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </MessagePrimitive.Root>
@@ -382,7 +475,6 @@ function AssistantMessage() {
 }
 
 function ToolInvocationsRenderer() {
-  const handleFormSubmit = useFormSubmit();
   const message = useMessage();
 
   // Get tool invocations from the current message's metadata
@@ -394,11 +486,7 @@ function ToolInvocationsRenderer() {
   return (
     <>
       {toolInvocations.map((invocation) => (
-        <DynamicUI
-          key={invocation.toolCallId}
-          toolInvocation={invocation}
-          {...(handleFormSubmit !== null ? { onSubmit: handleFormSubmit } : {})}
-        />
+        <ToolDisplay key={invocation.toolCallId} toolInvocation={invocation} />
       ))}
     </>
   );

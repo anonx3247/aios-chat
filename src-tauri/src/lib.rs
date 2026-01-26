@@ -69,6 +69,7 @@ pub fn run() {
             commands::threads::update_thread_title,
             commands::messages::save_message,
             commands::messages::get_messages,
+            commands::messages::delete_message,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

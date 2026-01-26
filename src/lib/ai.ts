@@ -12,6 +12,43 @@ export type { ToolInvocation };
 // Node backend URL - configurable for development vs production
 const NODE_BACKEND_URL = "http://localhost:3001";
 
+// Provider types
+export type AIProvider = "anthropic" | "ollama";
+
+export interface ProviderConfig {
+  provider: AIProvider;
+  anthropicApiKey: string | undefined;
+  perplexityApiKey: string | undefined;
+  ollamaBaseUrl: string;
+  ollamaModel: string;
+  enableTools: boolean;
+}
+
+const DEFAULT_OLLAMA_URL = "http://localhost:11434";
+const DEFAULT_OLLAMA_MODEL = "qwen3-vl:latest";
+
+// Provider configuration
+export function getProviderConfig(): ProviderConfig {
+  const provider = (localStorage.getItem("ai_provider") as AIProvider) ?? "ollama";
+  return {
+    provider,
+    anthropicApiKey: localStorage.getItem("anthropic_api_key") ?? undefined,
+    perplexityApiKey: localStorage.getItem("perplexity_api_key") ?? undefined,
+    ollamaBaseUrl: localStorage.getItem("ollama_base_url") ?? DEFAULT_OLLAMA_URL,
+    ollamaModel: localStorage.getItem("ollama_model") ?? DEFAULT_OLLAMA_MODEL,
+    // Default: tools enabled for Anthropic, disabled for Ollama (not all models support it)
+    enableTools: localStorage.getItem("enable_tools") === "true" || (localStorage.getItem("enable_tools") === null && provider === "anthropic"),
+  };
+}
+
+export function setProvider(provider: AIProvider): void {
+  localStorage.setItem("ai_provider", provider);
+}
+
+export function getProvider(): AIProvider {
+  return (localStorage.getItem("ai_provider") as AIProvider) ?? "ollama";
+}
+
 // API key storage - Anthropic
 export function setApiKey(key: string): void {
   localStorage.setItem("anthropic_api_key", key);
@@ -30,10 +67,47 @@ export function getPerplexityApiKey(): string | null {
   return localStorage.getItem("perplexity_api_key");
 }
 
+// Ollama configuration
+export function setOllamaBaseUrl(url: string): void {
+  localStorage.setItem("ollama_base_url", url);
+}
+
+export function getOllamaBaseUrl(): string {
+  return localStorage.getItem("ollama_base_url") ?? DEFAULT_OLLAMA_URL;
+}
+
+export function setOllamaModel(model: string): void {
+  localStorage.setItem("ollama_model", model);
+}
+
+export function getOllamaModel(): string {
+  return localStorage.getItem("ollama_model") ?? DEFAULT_OLLAMA_MODEL;
+}
+
+// Tools configuration
+export function setEnableTools(enabled: boolean): void {
+  localStorage.setItem("enable_tools", enabled ? "true" : "false");
+}
+
+export function getEnableTools(): boolean {
+  const stored = localStorage.getItem("enable_tools");
+  if (stored === null) {
+    // Default: enabled for Anthropic, disabled for Ollama
+    return getProvider() === "anthropic";
+  }
+  return stored === "true";
+}
+
+export interface ToolResult {
+  toolCallId: string;
+  result: unknown;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   toolInvocations?: ToolInvocation[];
+  toolResults?: ToolResult[]; // For passing tool results back to the model
 }
 
 export interface StreamResult {
@@ -117,12 +191,29 @@ export async function streamChatResponse(
   onToolInvocation?: (invocation: ToolInvocation) => void,
   enableTools = true
 ): Promise<StreamResult> {
-  const apiKey = getApiKey();
-  if (apiKey === null || apiKey === "") {
-    throw new Error("API key not set. Please add it in settings.");
+  const config = getProviderConfig();
+
+  // Validate config based on provider
+  if (config.provider === "anthropic" && !config.anthropicApiKey) {
+    throw new Error("Anthropic API key not set. Please add it in settings.");
   }
 
-  const perplexityApiKey = getPerplexityApiKey();
+  // Format messages for the API, including tool invocations and results
+  const formattedMessages = messages.map((m) => {
+    const msg: {
+      role: "user" | "assistant";
+      content: string;
+      toolInvocations?: ToolInvocation[];
+      toolResults?: ToolResult[];
+    } = { role: m.role, content: m.content };
+    if (m.toolInvocations !== undefined && m.toolInvocations.length > 0) {
+      msg.toolInvocations = m.toolInvocations;
+    }
+    if (m.toolResults !== undefined && m.toolResults.length > 0) {
+      msg.toolResults = m.toolResults;
+    }
+    return msg;
+  });
 
   const response = await fetch(`${NODE_BACKEND_URL}/api/chat`, {
     method: "POST",
@@ -130,10 +221,13 @@ export async function streamChatResponse(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      messages: messages.map((m) => ({ role: m.role, content: m.content })),
-      apiKey,
-      perplexityApiKey,
-      enableTools,
+      messages: formattedMessages,
+      provider: config.provider,
+      apiKey: config.anthropicApiKey,
+      perplexityApiKey: config.perplexityApiKey,
+      ollamaBaseUrl: config.ollamaBaseUrl,
+      model: config.provider === "ollama" ? config.ollamaModel : undefined,
+      enableTools: enableTools && config.enableTools,
     }),
   });
 
@@ -237,9 +331,10 @@ export async function generateConversationTitle(
   userMessage: string,
   assistantResponse: string
 ): Promise<string> {
-  const apiKey = getApiKey();
-  if (apiKey === null || apiKey === "") {
-    throw new Error("API key not set");
+  const config = getProviderConfig();
+
+  if (config.provider === "anthropic" && !config.anthropicApiKey) {
+    throw new Error("Anthropic API key not set");
   }
 
   const response = await fetch(`${NODE_BACKEND_URL}/api/generate-title`, {
@@ -250,7 +345,10 @@ export async function generateConversationTitle(
     body: JSON.stringify({
       userMessage,
       assistantResponse,
-      apiKey,
+      provider: config.provider,
+      apiKey: config.anthropicApiKey,
+      ollamaBaseUrl: config.ollamaBaseUrl,
+      model: config.provider === "ollama" ? config.ollamaModel : undefined,
     }),
   });
 

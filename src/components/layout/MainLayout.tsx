@@ -1,5 +1,5 @@
 import { useCallback, useState, useEffect } from "react";
-import { Settings, Sparkles, ChevronRight } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { Sidebar } from "./Sidebar";
 import { SettingsModal } from "./SettingsModal";
 import { ConversationSwitcher } from "./ConversationSwitcher";
@@ -161,44 +161,9 @@ export function MainLayout() {
         onDeleteThread={(id) => void handleDeleteThread(id)}
         onToggleCollapse={handleToggleSidebar}
         onMouseLeave={handleSidebarMouseLeave}
+        onOpenSettings={() => { setIsSettingsOpen(true); }}
       />
-      <main className="flex flex-1 flex-col">
-        <header
-          className="flex items-center justify-between border-b px-6 py-3 backdrop-blur"
-          style={{ borderColor: "var(--border-primary)", background: "var(--bg-primary)" }}
-        >
-          <div className="flex items-center gap-2">
-            {isSidebarCollapsed && (
-              <button
-                type="button"
-                onClick={() => { setIsSidebarCollapsed(false); }}
-                className="mr-2 rounded-lg p-2 transition-colors"
-                style={{ color: "var(--fg-muted)" }}
-                title="Expand sidebar"
-              >
-                <ChevronRight className="h-4 w-4" />
-              </button>
-            )}
-            <div
-              className="flex h-8 w-8 items-center justify-center rounded-lg"
-              style={{ background: "var(--bg-tertiary)" }}
-            >
-              <Sparkles className="h-4 w-4" style={{ color: "var(--fg-accent)" }} />
-            </div>
-            <h1 className="text-lg font-semibold">AIOS Chat</h1>
-          </div>
-          <button
-            type="button"
-            onClick={() => { setIsSettingsOpen(true); }}
-            className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors"
-            style={{ color: "var(--fg-muted)" }}
-            title="Settings"
-          >
-            <Settings className="h-4 w-4" />
-            <span className="hidden sm:inline">Settings</span>
-          </button>
-        </header>
-        <div className="flex-1 overflow-hidden">
+      <main className="flex flex-1 flex-col overflow-hidden">
           <ChatThread
             threadId={activeThreadId}
             onTitleGenerated={handleTitleGenerated}
@@ -208,7 +173,6 @@ export function MainLayout() {
             initialMessage={pendingMessage}
             onInitialMessageConsumed={handleMessageConsumed}
           />
-        </div>
       </main>
 
       <SettingsModal
