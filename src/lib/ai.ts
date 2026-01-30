@@ -18,8 +18,10 @@ import {
 // Re-export ToolInvocation type
 export type { ToolInvocation };
 
-// Node backend URL - configurable for development vs production
-const NODE_BACKEND_URL = "http://localhost:3001";
+import { API_BASE_URL } from "./config";
+
+// Node backend URL
+const NODE_BACKEND_URL = API_BASE_URL;
 
 // Provider types
 export type AIProvider = "anthropic" | "ollama";
