@@ -4,9 +4,11 @@
  * Manages connections to MCP servers (filesystem, fetch, time, email).
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import * as os from "os";
 import type { MCPServerConfig, MCPConnection, EmailConfig } from "../types.js";
+import { createFirecrawlServer } from "./firecrawl-server.js";
 
 // Active MCP connections
 const mcpConnections = new Map<string, MCPConnection>();
@@ -14,6 +16,10 @@ const mcpConnections = new Map<string, MCPConnection>();
 // Email MCP state
 let emailMCPConnected = false;
 let lastEmailConfig: EmailConfig | null = null;
+
+// Firecrawl MCP state
+let firecrawlMCPConnected = false;
+let lastFirecrawlApiKey: string | null = null;
 
 export function getMCPConnections(): Map<string, MCPConnection> {
   return mcpConnections;
@@ -62,11 +68,6 @@ export async function initializeMCPServers(): Promise<void> {
       name: "filesystem",
       command: "npx",
       args: ["-y", "@modelcontextprotocol/server-filesystem", homeDir],
-    },
-    {
-      name: "fetch",
-      command: "uvx",
-      args: ["mcp-server-fetch"],
     },
     {
       name: "time",
@@ -165,6 +166,65 @@ export async function connectEmailMCPIfNeeded(emailConfig: EmailConfig | undefin
     console.log(`Email MCP server connected with ${connection.tools.size} tools`);
   } else {
     console.error("Failed to connect email MCP server");
+  }
+}
+
+export async function connectFirecrawlMCPIfNeeded(apiKey: string | null | undefined): Promise<void> {
+  if (!apiKey) {
+    return;
+  }
+
+  if (firecrawlMCPConnected && lastFirecrawlApiKey === apiKey) {
+    return;
+  }
+
+  // Disconnect existing
+  if (firecrawlMCPConnected && mcpConnections.has("fetch")) {
+    try {
+      const connection = mcpConnections.get("fetch");
+      if (connection) {
+        await connection.transport.close();
+        mcpConnections.delete("fetch");
+      }
+    } catch (error) {
+      console.error("Error disconnecting Firecrawl MCP server:", error);
+    }
+    firecrawlMCPConnected = false;
+  }
+
+  try {
+    console.log("Connecting to Firecrawl MCP server (in-process)...");
+    const mcpServer = createFirecrawlServer(apiKey);
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    const client = new Client(
+      { name: "aios-chat", version: "0.1.0" },
+      { capabilities: {} }
+    );
+
+    // Connect server and client in parallel
+    await Promise.all([
+      mcpServer.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const toolsResult = await client.listTools();
+    const tools = new Map<string, { description: string; inputSchema: Record<string, unknown> }>();
+
+    for (const mcpTool of toolsResult.tools) {
+      tools.set(mcpTool.name, {
+        description: mcpTool.description ?? "",
+        inputSchema: mcpTool.inputSchema as Record<string, unknown>,
+      });
+    }
+
+    mcpConnections.set("fetch", { client, transport: clientTransport, tools });
+    firecrawlMCPConnected = true;
+    lastFirecrawlApiKey = apiKey;
+    console.log(`Firecrawl MCP server connected with ${tools.size} tools`);
+  } catch (error) {
+    console.error("Failed to connect Firecrawl MCP server:", error);
   }
 }
 

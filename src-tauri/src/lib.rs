@@ -75,6 +75,8 @@ pub fn run() {
             credentials::set_credential,
             credentials::delete_credential,
             credentials::get_all_credentials,
+            commands::settings::mark_settings_submitted,
+            commands::settings::is_settings_submitted,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

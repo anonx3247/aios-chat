@@ -24,6 +24,16 @@ pub fn init(conn: &Connection) -> Result<()> {
         ",
     )?;
 
+    conn.execute_batch(
+        r"
+        CREATE TABLE IF NOT EXISTS settings_submissions (
+            tool_call_id TEXT PRIMARY KEY,
+            settings_key TEXT NOT NULL,
+            submitted_at TEXT NOT NULL
+        );
+        ",
+    )?;
+
     // Enable foreign key constraints
     conn.execute("PRAGMA foreign_keys = ON", [])?;
 

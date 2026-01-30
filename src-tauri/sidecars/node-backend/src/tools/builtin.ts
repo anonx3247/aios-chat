@@ -59,17 +59,24 @@ The tool returns immediately with "awaiting_user_input" status. The user's respo
 export const configureSettingsTool = tool({
   description: `Request user to configure specific settings inline. Use when you need API keys, email credentials, or other configuration before proceeding with a task.
 
-Settings keys:
-- "email": Email address, password, IMAP/SMTP hosts for email functionality
-- "perplexity": Perplexity API key for web search
-- "anthropic": Anthropic API key
-- "ollama": Ollama URL and model
+Settings keys (hierarchical dot-notation):
+- "settings.provider": AI provider selection (Ollama/Anthropic)
+- "settings.keys": All API keys
+- "settings.keys.anthropic": Anthropic API key only
+- "settings.keys.perplexity": Perplexity API key only
+- "settings.keys.firecrawl": Firecrawl API key only (for web fetch & search)
+- "settings.email": Full email settings (address, password, IMAP, SMTP)
+- "settings.email.password": Email password only
+- "settings.email.imap": IMAP host/port/security only
+- "settings.email.smtp": SMTP host/port/security only
+
+Legacy flat keys also supported: "email", "perplexity", "anthropic", "ollama"
 
 The tool returns with awaiting_user_input=true. The user will fill out a form in the chat UI, then you can retry the operation.`,
   parameters: z.object({
     settings_key: z
-      .enum(["email", "perplexity", "anthropic", "ollama"])
-      .describe("Which settings to configure"),
+      .string()
+      .describe("Which settings to configure (dot-notation key like 'settings.email.password' or legacy flat key like 'email')"),
     reason: z.string().describe("Brief explanation of why this setting is needed"),
   }),
   execute: async ({ settings_key, reason }) => {

@@ -25,6 +25,7 @@ const CREDENTIAL_KEYS: &[&str] = &[
     "email_smtp_port",
     "email_smtp_security",
     "email_ssl_verify",
+    "firecrawl_api_key",
 ];
 
 /// Get a credential from the secure store

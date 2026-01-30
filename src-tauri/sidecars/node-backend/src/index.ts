@@ -23,6 +23,7 @@ import {
   initializeMCPServers,
   cleanupMCPServers,
   connectEmailMCPIfNeeded,
+  connectFirecrawlMCPIfNeeded,
   resetEmailMCPState,
   getMCPConnections,
 } from "./mcp/servers.js";
@@ -210,10 +211,12 @@ app.post("/api/chat", async (c) => {
     threadId?: string;
     apiKey?: string;
     perplexityApiKey?: string | null;
+    firecrawlApiKey?: string | null;
     model?: string;
     enableTools?: boolean;
-    provider?: "anthropic" | "ollama";
+    provider?: "anthropic" | "ollama" | "redpill";
     ollamaBaseUrl?: string;
+    redpillApiKey?: string;
     emailConfig?: EmailConfig;
   }>();
 
@@ -222,10 +225,12 @@ app.post("/api/chat", async (c) => {
     threadId,
     apiKey,
     perplexityApiKey,
+    firecrawlApiKey,
     model,
     enableTools = true,
     provider: providerType = "anthropic",
     ollamaBaseUrl = "http://localhost:11434",
+    redpillApiKey,
     emailConfig,
   } = body;
 
@@ -234,13 +239,17 @@ app.post("/api/chat", async (c) => {
     await connectEmailMCPIfNeeded(emailConfig);
   }
 
+  // Connect Firecrawl MCP if needed
+  await connectFirecrawlMCPIfNeeded(firecrawlApiKey);
+
   // Set agent context for tool execution
   setAgentContext({ threadId, apiKey, perplexityApiKey });
 
   // Create AI model
+  const effectiveApiKey = providerType === "redpill" ? redpillApiKey : apiKey;
   let aiModel: LanguageModelV1;
   try {
-    aiModel = createAIModel(providerType, apiKey, ollamaBaseUrl, model);
+    aiModel = createAIModel(providerType, effectiveApiKey, ollamaBaseUrl, model);
   } catch (err) {
     return c.json({ error: String(err) }, 400);
   }
@@ -480,257 +489,152 @@ app.post("/api/chat", async (c) => {
     modelForRequest = createOllamaToolModel(ollamaBaseUrl, model);
   }
 
-  if (useTools) {
-    // Manual multi-step tool execution with streaming
-    const maxSteps = 10;
-    let currentMessages = [...messages];
-    const totalUsage = { promptTokens: 0, completionTokens: 0 };
-
-    const encoder = new TextEncoder();
-    const { readable, writable } = new TransformStream();
-    const writer = writable.getWriter();
-
-    (async () => {
-      try {
-        await writer.write(
-          encoder.encode(`f:${JSON.stringify({ messageId: `msg-${Date.now()}` })}\n`)
-        );
-
-        for (let step = 0; step < maxSteps; step++) {
-          const msgChars = JSON.stringify(currentMessages).length;
-          const toolsChars = JSON.stringify(allTools).length;
-          const systemChars = systemPrompt?.length ?? 0;
-          const estimatedTokens = Math.ceil((msgChars + toolsChars + systemChars) / 2);
-          console.log(
-            `[Step ${step + 1}] Messages: ${currentMessages.length} (${msgChars} chars), Est. tokens: ${estimatedTokens}`
-          );
-          if (currentMessages.length > 0) {
-            const lastMsg = currentMessages[currentMessages.length - 1];
-            console.log(
-              `[Step ${step + 1}] Last message role: ${lastMsg.role}, content preview:`,
-              typeof lastMsg.content === "string"
-                ? lastMsg.content.slice(0, 100)
-                : JSON.stringify(lastMsg.content).slice(0, 100)
-            );
-          }
-
-          // Trim context if needed
-          const maxContextTokens = 180000;
-          if (estimatedTokens > maxContextTokens) {
-            console.log(`[Step ${step + 1}] Context too large, trimming...`);
-            while (currentMessages.length > 3) {
-              const currentChars = JSON.stringify(currentMessages).length;
-              const targetChars =
-                (maxContextTokens - Math.ceil((toolsChars + systemChars) / 2)) * 2;
-              if (currentChars <= targetChars) break;
-
-              let removedPair = false;
-              for (let i = 1; i < currentMessages.length - 2; i++) {
-                const msg = currentMessages[i];
-                if (msg.role === "assistant" && currentMessages[i + 1]?.role === "tool") {
-                  currentMessages.splice(i, 2);
-                  console.log(`[Step ${step + 1}] Removed tool pair at index ${i}`);
-                  removedPair = true;
-                  break;
-                }
-              }
-              if (!removedPair) break;
-            }
-          }
-
-          const result = streamText({
-            model: modelForRequest,
-            messages: currentMessages,
-            system: systemPrompt,
-            tools: allTools,
-            maxSteps: 1,
-          });
-
-          let stepText = "";
-          const stepToolCalls: Array<{
-            toolCallId: string;
-            toolName: string;
-            args: unknown;
-          }> = [];
-          const stepToolResults: Array<{ toolCallId: string; result: unknown }> = [];
-
-          for await (const part of result.fullStream) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const p = part as any;
-            if (p.type !== "text-delta") {
-              console.log(
-                `[Step ${step + 1}] Event: ${p.type}`,
-                p.type === "error" ? p : ""
-              );
-            }
-            if (p.type === "text-delta") {
-              const textDelta = p.textDelta as string;
-              stepText += textDelta;
-              await writer.write(encoder.encode(`0:${JSON.stringify(textDelta)}\n`));
-            } else if (p.type === "tool-call") {
-              const toolCallId = p.toolCallId as string;
-              const toolName = p.toolName as string;
-              const args = p.args;
-              stepToolCalls.push({ toolCallId, toolName, args });
-              await writer.write(
-                encoder.encode(
-                  `9:${JSON.stringify({ toolCallId, toolName, args })}\n`
-                )
-              );
-
-              if (threadId) {
-                const session = getSessionByThread(threadId);
-                if (session) {
-                  broadcastToThread(threadId, {
-                    type: "tool_call",
-                    sessionId: session.id,
-                    threadId,
-                    toolCall: {
-                      id: toolCallId,
-                      toolName,
-                      status: "calling",
-                      args: args as Record<string, unknown> | undefined,
-                    },
-                  });
-                }
-              }
-            } else if (p.type === "tool-result") {
-              const toolCallId = p.toolCallId as string;
-              const truncatedResult = truncateToolResultForContext(p.result);
-              stepToolResults.push({ toolCallId, result: truncatedResult });
-              await writer.write(
-                encoder.encode(
-                  `a:${JSON.stringify({ toolCallId, result: truncatedResult })}\n`
-                )
-              );
-
-              if (threadId) {
-                const session = getSessionByThread(threadId);
-                if (session) {
-                  broadcastToThread(threadId, {
-                    type: "tool_result",
-                    sessionId: session.id,
-                    threadId,
-                    toolCall: {
-                      id: toolCallId,
-                      toolName:
-                        stepToolCalls.find((tc) => tc.toolCallId === toolCallId)?.toolName ??
-                        "unknown",
-                      status: "done",
-                      result:
-                        typeof truncatedResult === "string"
-                          ? truncatedResult
-                          : JSON.stringify(truncatedResult),
-                    },
-                  });
-                }
-              }
-            } else if (p.type === "finish") {
-              const usage = p.usage as
-                | { promptTokens: number; completionTokens: number }
-                | undefined;
-              if (usage) {
-                totalUsage.promptTokens += usage.promptTokens;
-                totalUsage.completionTokens += usage.completionTokens;
-              }
-            }
-          }
-
-          console.log(
-            `[Step ${step + 1}] Completed: ${stepText.length} chars text, ${stepToolCalls.length} tool calls`
-          );
-
-          const hasAskUser = stepToolCalls.some((tc) => tc.toolName === "ask_user");
-          if (hasAskUser) {
-            console.log(`[Step ${step + 1}] ask_user called, pausing for user input`);
-            break;
-          }
-
-          if (stepToolCalls.length > 0) {
-            const assistantContent: Array<
-              | { type: "text"; text: string }
-              | {
-                  type: "tool-call";
-                  toolCallId: string;
-                  toolName: string;
-                  args: Record<string, unknown>;
-                }
-            > = [];
-            if (stepText) {
-              assistantContent.push({ type: "text", text: stepText });
-            }
-            for (const tc of stepToolCalls) {
-              assistantContent.push({
-                type: "tool-call",
-                toolCallId: tc.toolCallId,
-                toolName: tc.toolName,
-                args: tc.args as Record<string, unknown>,
-              });
-            }
-            currentMessages.push({
-              role: "assistant",
-              content: assistantContent,
-            } as (typeof currentMessages)[number]);
-
-            currentMessages.push({
-              role: "tool",
-              content: stepToolResults.map((tr) => ({
-                type: "tool-result" as const,
-                toolCallId: tr.toolCallId,
-                toolName:
-                  stepToolCalls.find((tc) => tc.toolCallId === tr.toolCallId)?.toolName ??
-                  "unknown",
-                result: tr.result,
-              })),
-            });
-
-            console.log(
-              `[Step ${step + 1}] ${stepToolCalls.length} tool calls, continuing to next step...`
-            );
-          } else {
-            console.log(`[Step ${step + 1}] No tool calls, finishing`);
-            break;
-          }
-        }
-
-        await writer.write(
-          encoder.encode(
-            `e:${JSON.stringify({ finishReason: "stop", usage: totalUsage })}\n`
-          )
-        );
-        await writer.write(
-          encoder.encode(
-            `d:${JSON.stringify({ finishReason: "stop", usage: totalUsage })}\n`
-          )
-        );
-      } catch (error) {
-        console.error("Multi-step streaming error:", error);
-        await writer.write(encoder.encode(`3:${JSON.stringify(String(error))}\n`));
-      } finally {
-        await writer.close();
-      }
-    })();
-
-    return new Response(readable, {
-      headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Access-Control-Allow-Origin": "*",
-      },
-    });
-  }
-
-  // Standard streaming for requests without tools
+  // Single-pass streaming with NDJSON protocol
+  // Frontend drives the tool loop by sending follow-up requests when hasToolCalls is true
   const result = streamText({
-    model: aiModel,
+    model: modelForRequest,
     messages,
+    ...(useTools ? { system: systemPrompt, tools: allTools } : {}),
     maxSteps: 1,
   });
 
-  const response = result.toDataStreamResponse();
-  const headers = new Headers(response.headers);
-  headers.set("Access-Control-Allow-Origin", "*");
+  const totalUsage = { promptTokens: 0, completionTokens: 0 };
+  const encoder = new TextEncoder();
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
 
-  return new Response(response.body, { status: response.status, headers });
+  const toolCalls: Array<{ toolCallId: string; toolName: string; args: unknown }> = [];
+
+  (async () => {
+    try {
+      for await (const part of result.fullStream) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const p = part as any;
+
+        if (p.type === "text-delta") {
+          const textDelta = p.textDelta as string;
+          await writer.write(
+            encoder.encode(JSON.stringify({ type: "text", content: textDelta }) + "\n")
+          );
+        } else if (p.type === "reasoning") {
+          const reasoning = p.textDelta as string;
+          await writer.write(
+            encoder.encode(JSON.stringify({ type: "thinking", content: reasoning }) + "\n")
+          );
+        } else if (p.type === "tool-call") {
+          const toolCallId = p.toolCallId as string;
+          const toolName = p.toolName as string;
+          const args = p.args;
+          toolCalls.push({ toolCallId, toolName, args });
+          await writer.write(
+            encoder.encode(
+              JSON.stringify({ type: "tool_call", id: toolCallId, name: toolName, args }) + "\n"
+            )
+          );
+
+          if (threadId) {
+            const session = getSessionByThread(threadId);
+            if (session) {
+              broadcastToThread(threadId, {
+                type: "tool_call",
+                sessionId: session.id,
+                threadId,
+                toolCall: {
+                  id: toolCallId,
+                  toolName,
+                  status: "calling",
+                  args: args as Record<string, unknown> | undefined,
+                },
+              });
+            }
+          }
+        } else if (p.type === "tool-result") {
+          const toolCallId = p.toolCallId as string;
+          const truncatedResult = truncateToolResultForContext(p.result);
+          await writer.write(
+            encoder.encode(
+              JSON.stringify({ type: "tool_result", id: toolCallId, result: truncatedResult }) + "\n"
+            )
+          );
+
+          if (threadId) {
+            const session = getSessionByThread(threadId);
+            if (session) {
+              broadcastToThread(threadId, {
+                type: "tool_result",
+                sessionId: session.id,
+                threadId,
+                toolCall: {
+                  id: toolCallId,
+                  toolName:
+                    toolCalls.find((tc) => tc.toolCallId === toolCallId)?.toolName ?? "unknown",
+                  status: "done",
+                  result:
+                    typeof truncatedResult === "string"
+                      ? truncatedResult
+                      : JSON.stringify(truncatedResult),
+                },
+              });
+            }
+          }
+        } else if (p.type === "finish") {
+          const usage = p.usage as
+            | { promptTokens: number; completionTokens: number }
+            | undefined;
+          if (usage) {
+            totalUsage.promptTokens += usage.promptTokens;
+            totalUsage.completionTokens += usage.completionTokens;
+          }
+        } else if (p.type === "error") {
+          console.error("[Stream] Error event:", p);
+          await writer.write(
+            encoder.encode(JSON.stringify({ type: "error", message: String(p.error ?? p) }) + "\n")
+          );
+        }
+      }
+
+      const hasToolCalls = toolCalls.length > 0;
+      console.log(
+        `[Stream] Completed: ${toolCalls.length} tool calls, hasToolCalls: ${hasToolCalls}`
+      );
+
+      await writer.write(
+        encoder.encode(
+          JSON.stringify({ type: "end", hasToolCalls, usage: totalUsage }) + "\n"
+        )
+      );
+    } catch (error) {
+      console.error("Streaming error:", error);
+      // Extract user-friendly message from API errors
+      let errorMessage = String(error);
+      const err = error as Record<string, unknown>;
+      if (err.responseBody && typeof err.responseBody === "string") {
+        try {
+          const body = JSON.parse(err.responseBody) as { error?: { message?: string } };
+          if (body.error?.message) {
+            errorMessage = body.error.message;
+          }
+        } catch {
+          // use default
+        }
+      }
+      if (err.statusCode === 402) {
+        errorMessage = "Account quota exceeded. Please add credits at your provider dashboard to continue.";
+      }
+      await writer.write(
+        encoder.encode(JSON.stringify({ type: "error", message: errorMessage }) + "\n")
+      );
+    } finally {
+      await writer.close();
+    }
+  })();
+
+  return new Response(readable, {
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
 });
 
 // =============================================================================
@@ -742,8 +646,9 @@ app.post("/api/generate-title", async (c) => {
     userMessage: string;
     assistantResponse: string;
     apiKey?: string;
-    provider?: "anthropic" | "ollama";
+    provider?: "anthropic" | "ollama" | "redpill";
     ollamaBaseUrl?: string;
+    redpillApiKey?: string;
     model?: string;
   }>();
 
@@ -753,12 +658,14 @@ app.post("/api/generate-title", async (c) => {
     apiKey,
     provider: providerType = "anthropic",
     ollamaBaseUrl = "http://localhost:11434",
+    redpillApiKey: titleRedpillApiKey,
     model: modelName,
   } = body;
 
+  const titleEffectiveApiKey = providerType === "redpill" ? titleRedpillApiKey : apiKey;
   let model: LanguageModelV1;
   try {
-    model = createAIModel(providerType, apiKey, ollamaBaseUrl, modelName);
+    model = createAIModel(providerType, titleEffectiveApiKey, ollamaBaseUrl, modelName);
   } catch (err) {
     return c.json({ error: String(err) }, 400);
   }

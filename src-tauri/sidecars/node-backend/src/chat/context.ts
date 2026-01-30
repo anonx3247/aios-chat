@@ -40,6 +40,11 @@ export function getMaxContextTokens(provider: string, model?: string): number {
     return 200000 - responseBuffer;
   }
 
+  if (provider === "redpill") {
+    // Kimi K2.5 has 256k context
+    return 248000 - responseBuffer;
+  }
+
   if (model?.includes("qwen")) return 30000 - responseBuffer;
   if (model?.includes("llama")) return 120000 - responseBuffer;
   if (model?.includes("deepseek")) return 60000 - responseBuffer;

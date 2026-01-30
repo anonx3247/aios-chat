@@ -24,12 +24,14 @@ import { API_BASE_URL } from "./config";
 const NODE_BACKEND_URL = API_BASE_URL;
 
 // Provider types
-export type AIProvider = "anthropic" | "ollama";
+export type AIProvider = "anthropic" | "ollama" | "redpill";
 
 export interface ProviderConfig {
   provider: AIProvider;
   anthropicApiKey: string | undefined;
   perplexityApiKey: string | undefined;
+  firecrawlApiKey: string | undefined;
+  redpillApiKey: string | undefined;
   ollamaBaseUrl: string;
   ollamaModel: string;
   enableTools: boolean;
@@ -61,7 +63,7 @@ export function setProvider(provider: AIProvider): void {
 
 export function getProvider(): AIProvider {
   const stored = localStorage.getItem("ai_provider");
-  return stored !== null ? (stored as AIProvider) : "ollama";
+  return stored !== null ? (stored as AIProvider) : "redpill";
 }
 
 export function setOllamaBaseUrl(url: string): void {
@@ -87,8 +89,9 @@ export function setEnableTools(enabled: boolean): void {
 export function getEnableTools(): boolean {
   const stored = localStorage.getItem("enable_tools");
   if (stored === null) {
-    // Default: enabled for Anthropic, disabled for Ollama
-    return getProvider() === "anthropic";
+    // Default: enabled for Anthropic and RedPill, disabled for Ollama
+    const p = getProvider();
+    return p === "anthropic" || p === "redpill";
   }
   return stored === "true";
 }
@@ -115,6 +118,24 @@ export async function getPerplexityApiKey(): Promise<string | null> {
   return getCredentialWithFallback("perplexity_api_key");
 }
 
+// API key storage - RedPill
+export async function setRedpillApiKey(key: string): Promise<void> {
+  await setCredentialWithFallback("redpill_api_key", key);
+}
+
+export async function getRedpillApiKey(): Promise<string | null> {
+  return getCredentialWithFallback("redpill_api_key");
+}
+
+// API key storage - Firecrawl
+export async function setFirecrawlApiKey(key: string): Promise<void> {
+  await setCredentialWithFallback("firecrawl_api_key", key);
+}
+
+export async function getFirecrawlApiKey(): Promise<string | null> {
+  return getCredentialWithFallback("firecrawl_api_key");
+}
+
 // Email credentials
 export async function setEmailCredential(
   key: Extract<CredentialKey, `email_${string}`>,
@@ -138,21 +159,25 @@ export async function getEmailCredential(
  */
 export async function getProviderConfigAsync(): Promise<ProviderConfig> {
   const provider = getProvider();
-  const [anthropicApiKey, perplexityApiKey] = await Promise.all([
+  const [anthropicApiKey, perplexityApiKey, firecrawlApiKey, redpillApiKey] = await Promise.all([
     getApiKey(),
     getPerplexityApiKey(),
+    getFirecrawlApiKey(),
+    getRedpillApiKey(),
   ]);
 
   return {
     provider,
     anthropicApiKey: anthropicApiKey ?? undefined,
     perplexityApiKey: perplexityApiKey ?? undefined,
+    firecrawlApiKey: firecrawlApiKey ?? undefined,
+    redpillApiKey: redpillApiKey ?? undefined,
     ollamaBaseUrl: getOllamaBaseUrl(),
     ollamaModel: getOllamaModel(),
-    // Default: tools enabled for Anthropic, disabled for Ollama (not all models support it)
+    // Default: tools enabled for Anthropic and RedPill, disabled for Ollama (not all models support it)
     enableTools:
       localStorage.getItem("enable_tools") === "true" ||
-      (localStorage.getItem("enable_tools") === null && provider === "anthropic"),
+      (localStorage.getItem("enable_tools") === null && (provider === "anthropic" || provider === "redpill")),
   };
 }
 
@@ -179,20 +204,24 @@ export async function getEmailConfigAsync(): Promise<EmailConfig> {
  * Synchronous provider config - DEPRECATED, use getProviderConfigAsync
  * Only returns non-sensitive settings; API keys will be undefined
  */
-export function getProviderConfig(): Omit<ProviderConfig, "anthropicApiKey" | "perplexityApiKey"> & {
+export function getProviderConfig(): Omit<ProviderConfig, "anthropicApiKey" | "perplexityApiKey" | "firecrawlApiKey" | "redpillApiKey"> & {
   anthropicApiKey: undefined;
   perplexityApiKey: undefined;
+  firecrawlApiKey: undefined;
+  redpillApiKey: undefined;
 } {
   const provider = getProvider();
   return {
     provider,
     anthropicApiKey: undefined,
     perplexityApiKey: undefined,
+    firecrawlApiKey: undefined,
+    redpillApiKey: undefined,
     ollamaBaseUrl: getOllamaBaseUrl(),
     ollamaModel: getOllamaModel(),
     enableTools:
       localStorage.getItem("enable_tools") === "true" ||
-      (localStorage.getItem("enable_tools") === null && provider === "anthropic"),
+      (localStorage.getItem("enable_tools") === null && (provider === "anthropic" || provider === "redpill")),
   };
 }
 
@@ -211,73 +240,27 @@ export interface ChatMessage {
 export interface StreamResult {
   text: string;
   toolInvocations: ToolInvocation[];
+  hasToolCalls: boolean;
 }
 
 /**
- * Parse AI SDK data stream format
- *
- * The AI SDK streams data in a specific format:
- * - Text chunks: 0:"text content"
- * - Tool calls: 9:{...tool call data...}
- * - Tool results: a:{...tool result data...}
- * - Finish: d:{...finish data...}
+ * NDJSON stream event types from the backend
  */
-function parseDataStreamLine(line: string): {
-  type: "text" | "tool-call" | "tool-result" | "finish" | "error" | "unknown";
-  data: unknown;
-} {
-  if (line.length === 0) {
-    return { type: "unknown", data: null };
-  }
-
-  // Format is: TYPE:DATA where TYPE is a single character
-  const colonIndex = line.indexOf(":");
-  if (colonIndex === -1) {
-    return { type: "unknown", data: line };
-  }
-
-  const typeChar = line.slice(0, colonIndex);
-  const dataStr = line.slice(colonIndex + 1);
-
-  switch (typeChar) {
-    case "0": // Text chunk
-      try {
-        return { type: "text", data: JSON.parse(dataStr) as string };
-      } catch {
-        return { type: "text", data: dataStr };
-      }
-
-    case "9": // Tool call
-      try {
-        return { type: "tool-call", data: JSON.parse(dataStr) };
-      } catch {
-        return { type: "unknown", data: dataStr };
-      }
-
-    case "a": // Tool result
-      try {
-        return { type: "tool-result", data: JSON.parse(dataStr) };
-      } catch {
-        return { type: "unknown", data: dataStr };
-      }
-
-    case "d": // Finish
-      try {
-        return { type: "finish", data: JSON.parse(dataStr) };
-      } catch {
-        return { type: "unknown", data: dataStr };
-      }
-
-    case "3": // Error
-      try {
-        return { type: "error", data: JSON.parse(dataStr) };
-      } catch {
-        return { type: "error", data: dataStr };
-      }
-
-    default:
-      return { type: "unknown", data: dataStr };
-  }
+interface NDJSONEvent {
+  type: "text" | "thinking" | "tool_call" | "tool_result" | "end" | "error";
+  // text/thinking
+  content?: string;
+  // tool_call
+  id?: string;
+  name?: string;
+  args?: Record<string, unknown>;
+  // tool_result
+  result?: unknown;
+  // end
+  hasToolCalls?: boolean;
+  usage?: { promptTokens: number; completionTokens: number };
+  // error
+  message?: string;
 }
 
 /**
@@ -296,6 +279,9 @@ export async function streamChatResponse(
   // Validate config based on provider
   if (config.provider === "anthropic" && (config.anthropicApiKey === undefined || config.anthropicApiKey === "")) {
     throw new Error("Anthropic API key not set. Please add it in settings.");
+  }
+  if (config.provider === "redpill" && (config.redpillApiKey === undefined || config.redpillApiKey === "")) {
+    throw new Error("RedPill API key not set. Please add it in settings.");
   }
 
   // Format messages for the API, including tool invocations and results
@@ -325,7 +311,9 @@ export async function streamChatResponse(
       threadId, // Pass threadId for agent context
       provider: config.provider,
       apiKey: config.anthropicApiKey,
+      redpillApiKey: config.redpillApiKey,
       perplexityApiKey: config.perplexityApiKey,
+      firecrawlApiKey: config.firecrawlApiKey,
       ollamaBaseUrl: config.ollamaBaseUrl,
       model: config.provider === "ollama" ? config.ollamaModel : undefined,
       enableTools: enableTools && config.enableTools,
@@ -361,6 +349,7 @@ export async function streamChatResponse(
   let fullText = "";
   const toolInvocations: ToolInvocation[] = [];
   const toolCallsInProgress = new Map<string, Partial<ToolInvocation>>();
+  let hasToolCalls = false;
 
   let buffer = "";
 
@@ -370,74 +359,89 @@ export async function streamChatResponse(
 
     buffer += decoder.decode(value, { stream: true });
 
-    // Process complete lines
+    // Process complete lines (NDJSON)
     const lines = buffer.split("\n");
     buffer = lines.pop() ?? ""; // Keep incomplete line in buffer
 
     for (const line of lines) {
-      const parsed = parseDataStreamLine(line);
+      if (line.length === 0) continue;
 
-      switch (parsed.type) {
+      let event: NDJSONEvent;
+      try {
+        event = JSON.parse(line) as NDJSONEvent;
+      } catch {
+        continue;
+      }
+
+      switch (event.type) {
         case "text":
-          if (typeof parsed.data === "string") {
-            fullText += parsed.data;
-            onChunk(parsed.data);
+          if (event.content !== undefined) {
+            fullText += event.content;
+            onChunk(event.content);
           }
           break;
 
-        case "tool-call": {
-          const toolCall = parsed.data as {
-            toolCallId: string;
-            toolName: string;
-            args: Record<string, unknown>;
-          };
+        case "thinking":
+          // Could be forwarded to UI in the future
+          break;
+
+        case "tool_call": {
           const callInvocation: ToolInvocation = {
-            toolCallId: toolCall.toolCallId,
-            toolName: toolCall.toolName,
-            args: toolCall.args,
+            toolCallId: event.id ?? "",
+            toolName: event.name ?? "unknown",
+            args: event.args ?? {},
             state: "call",
           };
-          toolCallsInProgress.set(toolCall.toolCallId, callInvocation);
-          // Emit tool call immediately so UI can show loading state
+          toolCallsInProgress.set(callInvocation.toolCallId, callInvocation);
           onToolInvocation?.(callInvocation);
           break;
         }
 
-        case "tool-result": {
-          const toolResult = parsed.data as {
-            toolCallId: string;
-            result: unknown;
-          };
-          const existing = toolCallsInProgress.get(toolResult.toolCallId);
+        case "tool_result": {
+          const existing = toolCallsInProgress.get(event.id ?? "");
           if (existing !== undefined) {
             const resultInvocation: ToolInvocation = {
-              toolCallId: existing.toolCallId ?? toolResult.toolCallId,
+              toolCallId: existing.toolCallId ?? event.id ?? "",
               toolName: existing.toolName ?? "unknown",
               args: existing.args ?? {},
               state: "result",
-              result: toolResult.result,
+              result: event.result,
             };
             toolInvocations.push(resultInvocation);
-            toolCallsInProgress.delete(toolResult.toolCallId);
-            // Emit completed tool invocation
+            toolCallsInProgress.delete(event.id ?? "");
             onToolInvocation?.(resultInvocation);
           }
           break;
         }
+
+        case "end":
+          hasToolCalls = event.hasToolCalls ?? false;
+          break;
+
+        case "error":
+          console.error("[streamChatResponse] Backend error:", event.message);
+          throw new Error(event.message ?? "Unknown error from backend");
+          break;
       }
     }
   }
 
   // Process any remaining buffer
   if (buffer.length > 0) {
-    const parsed = parseDataStreamLine(buffer);
-    if (parsed.type === "text" && typeof parsed.data === "string") {
-      fullText += parsed.data;
-      onChunk(parsed.data);
+    try {
+      const event = JSON.parse(buffer) as NDJSONEvent;
+      if (event.type === "text" && event.content !== undefined) {
+        fullText += event.content;
+        onChunk(event.content);
+      } else if (event.type === "end") {
+        hasToolCalls = event.hasToolCalls ?? false;
+      }
+    } catch {
+      // Incomplete JSON, ignore
     }
   }
 
-  return { text: fullText, toolInvocations };
+  return { text: fullText, toolInvocations, hasToolCalls };
 }
 
 /**
@@ -452,6 +456,9 @@ export async function generateConversationTitle(
   if (config.provider === "anthropic" && (config.anthropicApiKey === undefined || config.anthropicApiKey === "")) {
     throw new Error("Anthropic API key not set");
   }
+  if (config.provider === "redpill" && (config.redpillApiKey === undefined || config.redpillApiKey === "")) {
+    throw new Error("RedPill API key not set");
+  }
 
   const response = await fetch(`${NODE_BACKEND_URL}/api/generate-title`, {
     method: "POST",
@@ -463,6 +470,7 @@ export async function generateConversationTitle(
       assistantResponse,
       provider: config.provider,
       apiKey: config.anthropicApiKey,
+      redpillApiKey: config.redpillApiKey,
       ollamaBaseUrl: config.ollamaBaseUrl,
       model: config.provider === "ollama" ? config.ollamaModel : undefined,
     }),

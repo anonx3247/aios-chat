@@ -111,7 +111,7 @@ export interface MCPServerConfig {
 
 export interface MCPConnection {
   client: import("@modelcontextprotocol/sdk/client/index.js").Client;
-  transport: import("@modelcontextprotocol/sdk/client/stdio.js").StdioClientTransport;
+  transport: { close(): Promise<void> };
   tools: Map<string, { description: string; inputSchema: Record<string, unknown> }>;
 }
 

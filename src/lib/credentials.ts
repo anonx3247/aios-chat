@@ -15,6 +15,8 @@ import { invoke } from "@tauri-apps/api/core";
 export type CredentialKey =
   | "anthropic_api_key"
   | "perplexity_api_key"
+  | "firecrawl_api_key"
+  | "redpill_api_key"
   | "email_address"
   | "email_username"
   | "email_password"
@@ -116,6 +118,8 @@ export async function getAllCredentialsWithFallback(): Promise<Record<string, st
   const keys: CredentialKey[] = [
     "anthropic_api_key",
     "perplexity_api_key",
+    "firecrawl_api_key",
+    "redpill_api_key",
     "email_address",
     "email_username",
     "email_password",

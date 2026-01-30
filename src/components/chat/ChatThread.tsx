@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, createContext, useContext } from "react";
+import { useState, useEffect, useRef, useCallback, createContext, useContext, Component, type ReactNode, type ErrorInfo } from "react";
 import {
   AssistantRuntimeProvider,
   ThreadPrimitive,
@@ -7,13 +7,46 @@ import {
   useThreadRuntime,
   useMessage,
 } from "@assistant-ui/react";
-import { ArrowUp, Sparkles, MessageCircle, RotateCcw } from "lucide-react";
+import { ArrowUp, Sparkles, MessageCircle, RotateCcw, AlertTriangle } from "lucide-react";
 import type { Thread } from "@app/types/thread";
 import { useChatRuntime } from "@app/hooks/useChatRuntime";
 import { Markdown } from "./Markdown";
 import { ToolDisplay } from "./ToolDisplay";
 import { AskUserQuestion, type AskUserQuestionArgs } from "./AskUserQuestion";
 import type { ToolInvocation } from "@app/types/message";
+import type { StreamingContentPart } from "@app/hooks/useChatRuntime";
+
+// Error boundary to prevent individual message/tool render errors from blanking the screen
+interface MessageErrorBoundaryProps {
+  children: ReactNode;
+}
+interface MessageErrorBoundaryState {
+  hasError: boolean;
+  error?: Error;
+}
+class MessageErrorBoundary extends Component<MessageErrorBoundaryProps, MessageErrorBoundaryState> {
+  constructor(props: MessageErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError(error: Error): MessageErrorBoundaryState {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    console.error("[MessageErrorBoundary] Render error:", error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex items-center gap-2 rounded-xl px-3 py-2 text-xs" style={{ background: "var(--bg-hover)", color: "var(--fg-muted)" }}>
+          <AlertTriangle className="h-3.5 w-3.5" style={{ color: "var(--warning, var(--fg-muted))" }} />
+          <span>Failed to render message</span>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // Store scroll positions per thread (persists across re-renders)
 const scrollPositions = new Map<string, number>();
@@ -126,12 +159,15 @@ function WelcomeScreen({ onStartChatWithMessage, onSelectThread, recentThreads }
   );
 }
 
-// Context for pending ask_user question and regenerate
+// Context for pending ask_user question, regenerate, running state, and live streaming
 interface ChatContext {
   pendingAskUser: { toolCallId: string; args: AskUserQuestionArgs } | null;
   onAskUserSubmit: (response: unknown) => void | Promise<void>;
   onAskUserCancel: () => void | Promise<void>;
   onRegenerate: () => void | Promise<void>;
+  isRunning: boolean;
+  streamingContentParts: StreamingContentPart[];
+  streamingContent: string;
 }
 const ChatContextProvider = createContext<ChatContext | null>(null);
 function useChatContext() {
@@ -139,7 +175,7 @@ function useChatContext() {
 }
 
 export function ChatThread({ threadId, onTitleGenerated, onStartChatWithMessage, onSelectThread, recentThreads, initialMessage, onInitialMessageConsumed }: ChatThreadProps) {
-  const { runtime, pendingAskUser, handleAskUserSubmit, handleAskUserCancel, regenerateLastMessage } = useChatRuntime({ threadId, onTitleGenerated, initialMessage, onInitialMessageConsumed });
+  const { runtime, isRunning, streamingContentParts, streamingContent, pendingAskUser, handleAskUserSubmit, handleAskUserCancel, regenerateLastMessage } = useChatRuntime({ threadId, onTitleGenerated, initialMessage, onInitialMessageConsumed });
   const prevThreadIdRef = useRef<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -179,6 +215,9 @@ export function ChatThread({ threadId, onTitleGenerated, onStartChatWithMessage,
     onAskUserSubmit: handleAskUserSubmit,
     onAskUserCancel: handleAskUserCancel,
     onRegenerate: regenerateLastMessage,
+    isRunning,
+    streamingContentParts,
+    streamingContent,
   };
 
   return (
@@ -276,13 +315,12 @@ function ThreadContent({ scrollRef }: ThreadContentProps) {
           </ThreadPrimitive.If>
           <ThreadPrimitive.Messages
             components={{
-              UserMessage: UserMessage,
+              UserMessage: () => <MessageErrorBoundary><UserMessage /></MessageErrorBoundary>,
               AssistantMessage: AssistantMessage,
             }}
           />
-          <ThreadPrimitive.If running>
-            <ThinkingIndicator />
-          </ThreadPrimitive.If>
+          <StreamingMessage />
+          <ChatRunningIndicator />
         </ThreadPrimitive.Viewport>
       </ThreadPrimitive.Root>
 
@@ -344,18 +382,40 @@ function CurrentTimeHeader() {
   );
 }
 
-function ThinkingIndicator() {
-  const runtime = useThreadRuntime();
-  const messages = runtime.getState().messages;
-  const lastMessage = messages[messages.length - 1];
+function StreamingMessage() {
+  const chatContext = useChatContext();
+  if (chatContext?.isRunning !== true) return null;
 
-  // Don't show thinking indicator if we already have streaming content
-  if (lastMessage?.role === "assistant" && lastMessage.id === "streaming") {
-    const content = lastMessage.content[0];
-    if (content?.type === "text" && content.text.length > 0) {
-      return null;
-    }
-  }
+  const { streamingContentParts } = chatContext;
+  const hasContent = streamingContentParts.length > 0;
+  if (!hasContent) return null;
+
+  return (
+    <div className="group flex justify-start">
+      <div className="flex max-w-[85%] gap-3 overflow-hidden">
+        <div
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full shadow-md"
+          style={{ background: "var(--bg-tertiary)" }}
+        >
+          <Sparkles className="h-4 w-4" style={{ color: "var(--fg-accent)" }} />
+        </div>
+        <div className="flex min-w-0 flex-1 flex-col gap-2 overflow-hidden">
+          <MessageErrorBoundary>
+            <InterleavedContent parts={streamingContentParts} />
+          </MessageErrorBoundary>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ChatRunningIndicator() {
+  const chatContext = useChatContext();
+
+  if (chatContext?.isRunning !== true) return null;
+
+  // Don't show if streaming content is already visible
+  if (chatContext.streamingContentParts.length > 0) return null;
 
   return (
     <div className="flex justify-start">
@@ -413,7 +473,7 @@ function AssistantMessage() {
   const custom = message.metadata.custom as { toolInvocations?: ToolInvocation[] } | undefined;
   const hasToolInvocations = (custom?.toolInvocations?.length ?? 0) > 0;
 
-  // Don't render anything if there's no content and no tools (thinking state handled by ThinkingIndicator)
+  // Don't render anything if there's no content and no tools (thinking state handled by ChatRunningIndicator)
   if (!hasTextContent && !hasToolInvocations) {
     return null;
   }
@@ -439,20 +499,22 @@ function AssistantMessage() {
           <Sparkles className="h-4 w-4" style={{ color: "var(--fg-accent)" }} />
         </div>
         <div className="flex min-w-0 flex-1 flex-col gap-2 overflow-hidden">
-          {/* Only show text bubble if there's actual content */}
-          {hasTextContent && (
-            <div
-              className="rounded-2xl px-4 py-3 shadow-md"
-              style={{ background: "var(--bg-tertiary)", color: "var(--fg-primary)" }}
-            >
-              <MessagePrimitive.Content
-                components={{
-                  Text: ({ text }) => <Markdown content={text} />,
-                }}
-              />
-            </div>
-          )}
-          <ToolInvocationsRenderer />
+          <MessageErrorBoundary>
+            {/* Only show text bubble if there's actual content */}
+            {hasTextContent && (
+              <div
+                className="rounded-2xl px-4 py-3 shadow-md"
+                style={{ background: "var(--bg-tertiary)", color: "var(--fg-primary)" }}
+              >
+                <MessagePrimitive.Content
+                  components={{
+                    Text: ({ text }) => <Markdown content={text} />,
+                  }}
+                />
+              </div>
+            )}
+            <ToolInvocationsRenderer />
+          </MessageErrorBoundary>
           {/* Regenerate button - only shown on last assistant message when not running */}
           {canRegenerate && (
             <div className="flex opacity-0 transition-opacity group-hover:opacity-100">
@@ -471,6 +533,30 @@ function AssistantMessage() {
         </div>
       </div>
     </MessagePrimitive.Root>
+  );
+}
+
+function InterleavedContent({ parts }: { parts: StreamingContentPart[] }) {
+  return (
+    <>
+      {parts.map((part, i) => {
+        if (part.type === "text") {
+          if (part.text.trim().length === 0) return null;
+          return (
+            <div
+              key={`text-${String(i)}`}
+              className="rounded-2xl px-4 py-3 shadow-md"
+              style={{ background: "var(--bg-tertiary)", color: "var(--fg-primary)" }}
+            >
+              <Markdown content={part.text} />
+            </div>
+          );
+        }
+        return (
+          <ToolDisplay key={part.invocation.toolCallId} toolInvocation={part.invocation} />
+        );
+      })}
+    </>
   );
 }
 
