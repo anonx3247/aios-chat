@@ -15,6 +15,346 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import Anthropic from "@anthropic-ai/sdk";
 import * as os from "os";
+import { WebSocketServer, WebSocket } from "ws";
+import { randomUUID } from "crypto";
+
+// =============================================================================
+// Agent Session & Task Management
+// =============================================================================
+
+/**
+ * Task status for agent orchestration
+ */
+type AgentTaskStatus = "staged" | "in_progress" | "done" | "cancelled";
+
+/**
+ * Task type for categorization
+ */
+type AgentTaskType = "plan" | "explore" | "execute";
+
+/**
+ * A task tracked during agent orchestration
+ */
+interface AgentTask {
+  id: string;
+  sessionId: string;
+  title: string;
+  description: string;
+  type: AgentTaskType;
+  status: AgentTaskStatus;
+  result?: unknown;
+  createdAt: Date;
+  startedAt?: Date;
+  completedAt?: Date;
+}
+
+/**
+ * Session status for orchestration pipeline
+ */
+type AgentSessionStatus = "planning" | "exploring" | "executing" | "waiting_user" | "complete" | "error";
+
+/**
+ * An agent session for a thread
+ */
+interface AgentSession {
+  id: string;
+  threadId: string;
+  status: AgentSessionStatus;
+  tasks: Map<string, AgentTask>;
+  planContent?: string;
+  error?: string;
+  createdAt: Date;
+  lastActivityAt: Date;
+}
+
+/**
+ * WebSocket update message types
+ */
+interface WSUpdateBase {
+  sessionId: string;
+  threadId: string;
+}
+
+interface WSSessionUpdate extends WSUpdateBase {
+  type: "session_created" | "session_updated" | "session_complete" | "session_error";
+  session: {
+    id: string;
+    status: AgentSessionStatus;
+    error?: string;
+  };
+}
+
+interface WSTaskUpdate extends WSUpdateBase {
+  type: "task_created" | "task_updated";
+  task: AgentTask;
+}
+
+interface WSExploreUpdate extends WSUpdateBase {
+  type: "explore_started" | "explore_complete";
+  count?: number;
+  prompts?: string[];
+  results?: string[];
+}
+
+interface WSSubAgentUpdate extends WSUpdateBase {
+  type: "sub_agent_started" | "sub_agent_done" | "sub_executor_started" | "sub_executor_done";
+  index: number;
+  prompt?: string;
+  taskIds?: string[];
+  summary?: string;
+  success?: boolean;
+}
+
+interface WSToolCallUpdate extends WSUpdateBase {
+  type: "tool_call" | "tool_result";
+  toolCall: {
+    id: string;
+    toolName: string;
+    status: "calling" | "done";
+    args?: Record<string, unknown>;
+    result?: string;
+  };
+}
+
+type WSUpdate = WSSessionUpdate | WSTaskUpdate | WSExploreUpdate | WSSubAgentUpdate | WSToolCallUpdate;
+
+// In-memory stores for agent sessions
+const agentSessions = new Map<string, AgentSession>();
+const sessionsByThread = new Map<string, string>(); // threadId -> sessionId
+
+// WebSocket clients by threadId
+const wsClientsByThread = new Map<string, Set<WebSocket>>();
+
+/**
+ * Create a new agent session for a thread
+ */
+function createAgentSession(threadId: string): AgentSession {
+  // Clean up any existing session for this thread
+  const existingSessionId = sessionsByThread.get(threadId);
+  if (existingSessionId) {
+    agentSessions.delete(existingSessionId);
+  }
+
+  const session: AgentSession = {
+    id: randomUUID(),
+    threadId,
+    status: "planning",
+    tasks: new Map(),
+    createdAt: new Date(),
+    lastActivityAt: new Date(),
+  };
+
+  agentSessions.set(session.id, session);
+  sessionsByThread.set(threadId, session.id);
+
+  // Broadcast session creation
+  broadcastToThread(threadId, {
+    type: "session_created",
+    sessionId: session.id,
+    threadId,
+    session: { id: session.id, status: session.status },
+  });
+
+  return session;
+}
+
+/**
+ * Get session by thread ID
+ */
+function getSessionByThread(threadId: string): AgentSession | undefined {
+  const sessionId = sessionsByThread.get(threadId);
+  return sessionId ? agentSessions.get(sessionId) : undefined;
+}
+
+/**
+ * Update session status
+ */
+function updateSessionStatus(sessionId: string, status: AgentSessionStatus, error?: string): void {
+  const session = agentSessions.get(sessionId);
+  if (!session) return;
+
+  session.status = status;
+  session.lastActivityAt = new Date();
+  if (error) session.error = error;
+
+  const updateType = status === "complete" ? "session_complete" :
+                     status === "error" ? "session_error" : "session_updated";
+
+  broadcastToThread(session.threadId, {
+    type: updateType,
+    sessionId,
+    threadId: session.threadId,
+    session: { id: session.id, status, error },
+  });
+}
+
+/**
+ * Add a task to a session
+ */
+function addTaskToSession(
+  sessionId: string,
+  title: string,
+  description: string,
+  type: AgentTaskType
+): AgentTask {
+  const session = agentSessions.get(sessionId);
+  if (!session) throw new Error(`Session ${sessionId} not found`);
+
+  const task: AgentTask = {
+    id: randomUUID(),
+    sessionId,
+    title,
+    description,
+    type,
+    status: "staged",
+    createdAt: new Date(),
+  };
+
+  session.tasks.set(task.id, task);
+  session.lastActivityAt = new Date();
+
+  broadcastToThread(session.threadId, {
+    type: "task_created",
+    sessionId,
+    threadId: session.threadId,
+    task,
+  });
+
+  return task;
+}
+
+/**
+ * Update a task's status
+ */
+function updateTaskStatus(
+  sessionId: string,
+  taskId: string,
+  status: AgentTaskStatus,
+  result?: unknown
+): void {
+  const session = agentSessions.get(sessionId);
+  if (!session) return;
+
+  const task = session.tasks.get(taskId);
+  if (!task) return;
+
+  task.status = status;
+  if (result !== undefined) task.result = result;
+
+  if (status === "in_progress" && !task.startedAt) {
+    task.startedAt = new Date();
+  }
+  if (status === "done" || status === "cancelled") {
+    task.completedAt = new Date();
+  }
+
+  session.lastActivityAt = new Date();
+
+  broadcastToThread(session.threadId, {
+    type: "task_updated",
+    sessionId,
+    threadId: session.threadId,
+    task,
+  });
+}
+
+/**
+ * Get all tasks for a session
+ */
+function getSessionTasks(sessionId: string): AgentTask[] {
+  const session = agentSessions.get(sessionId);
+  return session ? Array.from(session.tasks.values()) : [];
+}
+
+/**
+ * Clear completed/cancelled tasks from a session
+ */
+function clearCompletedTasks(sessionId: string): void {
+  const session = agentSessions.get(sessionId);
+  if (!session) return;
+
+  for (const [taskId, task] of session.tasks) {
+    if (task.status === "done" || task.status === "cancelled") {
+      session.tasks.delete(taskId);
+    }
+  }
+}
+
+/**
+ * Broadcast an update to all WebSocket clients watching a thread
+ */
+function broadcastToThread(threadId: string, update: WSUpdate): void {
+  const clients = wsClientsByThread.get(threadId);
+  if (!clients) return;
+
+  const message = JSON.stringify(update);
+  for (const client of clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  }
+}
+
+// =============================================================================
+// WebSocket Server
+// =============================================================================
+
+const wsPort = parseInt(process.env.WS_PORT ?? "3002", 10);
+const wss = new WebSocketServer({ port: wsPort });
+
+wss.on("connection", (ws, req) => {
+  // Parse threadId from URL query params
+  const url = new URL(req.url ?? "", `http://localhost:${wsPort}`);
+  const threadId = url.searchParams.get("threadId");
+
+  if (!threadId) {
+    ws.close(1008, "threadId required");
+    return;
+  }
+
+  console.log(`[WS] Client connected for thread: ${threadId}`);
+
+  // Add to clients map
+  if (!wsClientsByThread.has(threadId)) {
+    wsClientsByThread.set(threadId, new Set());
+  }
+  wsClientsByThread.get(threadId)!.add(ws);
+
+  // Send current session state if exists
+  const session = getSessionByThread(threadId);
+  if (session) {
+    ws.send(JSON.stringify({
+      type: "session_updated",
+      sessionId: session.id,
+      threadId,
+      session: { id: session.id, status: session.status, error: session.error },
+    }));
+
+    // Send all tasks
+    for (const task of session.tasks.values()) {
+      ws.send(JSON.stringify({
+        type: "task_updated",
+        sessionId: session.id,
+        threadId,
+        task,
+      }));
+    }
+  }
+
+  ws.on("close", () => {
+    console.log(`[WS] Client disconnected for thread: ${threadId}`);
+    wsClientsByThread.get(threadId)?.delete(ws);
+    if (wsClientsByThread.get(threadId)?.size === 0) {
+      wsClientsByThread.delete(threadId);
+    }
+  });
+
+  ws.on("error", (err) => {
+    console.error(`[WS] Error for thread ${threadId}:`, err);
+  });
+});
+
+console.log(`WebSocket server starting on port ${wsPort}...`);
 
 // =============================================================================
 // MCP Server Management
@@ -165,6 +505,115 @@ async function initializeMCPServers(): Promise<void> {
 }
 
 /**
+ * Email MCP server configuration
+ * Connected dynamically when email credentials are provided
+ */
+interface EmailConfig {
+  address: string;
+  username?: string;
+  password: string;
+  imapHost?: string;
+  imapPort?: string;
+  imapSecurity?: string; // "ssl" (default), "starttls", or "none"
+  smtpHost?: string;
+  smtpPort?: string;
+  smtpSecurity?: string; // "ssl" (default), "starttls", or "none"
+  sslVerify?: string;
+}
+
+let emailMCPConnected = false;
+let lastEmailConfig: EmailConfig | null = null;
+
+/**
+ * Connect to email MCP server if credentials are provided
+ * Only reconnects if credentials have changed
+ */
+async function connectEmailMCPIfNeeded(emailConfig: EmailConfig | undefined): Promise<void> {
+  if (!emailConfig?.address || !emailConfig?.password) {
+    return;
+  }
+
+  // Check if we need to reconnect (first time or credentials changed)
+  const configChanged = !lastEmailConfig ||
+    lastEmailConfig.address !== emailConfig.address ||
+    lastEmailConfig.username !== emailConfig.username ||
+    lastEmailConfig.password !== emailConfig.password ||
+    lastEmailConfig.imapHost !== emailConfig.imapHost ||
+    lastEmailConfig.imapPort !== emailConfig.imapPort ||
+    lastEmailConfig.imapSecurity !== emailConfig.imapSecurity ||
+    lastEmailConfig.smtpHost !== emailConfig.smtpHost ||
+    lastEmailConfig.smtpPort !== emailConfig.smtpPort ||
+    lastEmailConfig.smtpSecurity !== emailConfig.smtpSecurity ||
+    lastEmailConfig.sslVerify !== emailConfig.sslVerify;
+
+  if (emailMCPConnected && !configChanged) {
+    return;
+  }
+
+  // Disconnect existing email server if connected
+  if (emailMCPConnected && mcpConnections.has("email")) {
+    try {
+      const connection = mcpConnections.get("email");
+      if (connection) {
+        await connection.transport.close();
+        mcpConnections.delete("email");
+      }
+    } catch (error) {
+      console.error("Error disconnecting email MCP server:", error);
+    }
+    emailMCPConnected = false;
+  }
+
+  // Build environment variables for @anonx3247/email-mcp
+  const env: Record<string, string> = {
+    EMAIL_ADDRESS: emailConfig.address,
+    EMAIL_USERNAME: emailConfig.username || emailConfig.address,
+    EMAIL_PASSWORD: emailConfig.password,
+  };
+
+  if (emailConfig.imapHost) {
+    env.IMAP_HOST = emailConfig.imapHost;
+  }
+  if (emailConfig.imapPort) {
+    env.IMAP_PORT = emailConfig.imapPort;
+  }
+  if (emailConfig.imapSecurity) {
+    env.IMAP_SECURITY = emailConfig.imapSecurity;
+  }
+  if (emailConfig.smtpHost) {
+    env.SMTP_HOST = emailConfig.smtpHost;
+  }
+  if (emailConfig.smtpPort) {
+    env.SMTP_PORT = emailConfig.smtpPort;
+  }
+  if (emailConfig.smtpSecurity) {
+    env.SMTP_SECURITY = emailConfig.smtpSecurity;
+  }
+  if (emailConfig.sslVerify === "false") {
+    env.SSL_VERIFY = "false";
+  }
+
+  const emailServerConfig: MCPServerConfig = {
+    name: "email",
+    command: "npx",
+    args: ["email-mcp"],
+    env,
+  };
+
+  console.log(`Connecting to email MCP server for ${emailConfig.address}...`);
+  console.log("Email MCP env:", JSON.stringify(Object.fromEntries(Object.entries(env).map(([k, v]) => [k, k.includes("PASSWORD") ? "***" : v]))));
+  const connection = await connectMCPServer(emailServerConfig);
+  if (connection) {
+    mcpConnections.set("email", connection);
+    emailMCPConnected = true;
+    lastEmailConfig = { ...emailConfig };
+    console.log(`Email MCP server connected with ${connection.tools.size} tools`);
+  } else {
+    console.error("Failed to connect email MCP server");
+  }
+}
+
+/**
  * Max size for tool results to prevent context overflow
  * ~8k chars ≈ 4k tokens per result
  * With up to 10 tool calls, that's ~40k tokens max for tool results
@@ -253,11 +702,15 @@ async function cleanupMCPServers(): Promise<void> {
 
 // Handle graceful shutdown
 process.on("SIGINT", async () => {
+  console.log("Shutting down...");
+  wss.close();
   await cleanupMCPServers();
   process.exit(0);
 });
 
 process.on("SIGTERM", async () => {
+  console.log("Shutting down...");
+  wss.close();
   await cleanupMCPServers();
   process.exit(0);
 });
@@ -279,13 +732,27 @@ function generateSystemPrompt(hasPerplexity: boolean, hasMCPTools: boolean): str
   - Use "text" for free-form text input
   - Provide clear, concise questions with helpful option descriptions
 
+- **configure_settings**: Request user to configure settings inline
+  - Use when you need API keys, email credentials, or other config before proceeding
+  - Settings keys: "email", "perplexity", "anthropic", "ollama"
+  - A form will appear inline in the chat for the user to fill out
+  - After user saves settings, retry the original operation
+
 ### Content Embedding
 - **embed**: Display rich media inline in the chat
   - YouTube videos (youtube.com, youtu.be)
   - Spotify tracks/playlists/albums (open.spotify.com)
   - Google Maps locations and directions (google.com/maps)
   - Social media posts (Twitter/X, Instagram, TikTok, Facebook, LinkedIn)
-  - Use when sharing relevant videos, music, maps, or social content`;
+  - Use when sharing relevant videos, music, maps, or social content
+
+### Multi-Agent Orchestration
+- **complex**: Delegate complex tasks to the multi-agent system
+  - Use when a task requires multiple steps, research, or parallel work
+  - A planning agent will analyze, gather information, and execute
+  - Progress will be shown in a task panel on the side
+  - Best for: refactoring, research projects, multi-file changes, complex implementations
+  - NOT for: simple questions, single edits, quick clarifications`;
 
   if (hasPerplexity) {
     prompt += `
@@ -325,7 +792,13 @@ When presenting search results, format citations as markdown links: [Source Titl
 
 ### Time Operations (time_*)
 - **time_get_current_time**: Get the current time in a specific timezone
-- **time_convert_time**: Convert time between timezones`;
+- **time_convert_time**: Convert time between timezones
+
+### Email Operations (email_*) - if configured
+- **email_send**: Send an email
+- **email_fetch**: Fetch recent emails from inbox
+- **email_search**: Search emails by criteria
+- Use configure_settings tool if email credentials are not configured`;
   }
 
   prompt += `
@@ -512,6 +985,38 @@ function parseEmbedUrl(url: string): EmbedInfo {
   }
 }
 
+// =============================================================================
+// Configure Settings Tool
+// =============================================================================
+
+const configureSettingsTool = tool({
+  description: `Request user to configure specific settings inline. Use when you need API keys, email credentials, or other configuration before proceeding with a task.
+
+Settings keys:
+- "email": Email address, password, IMAP/SMTP hosts for email functionality
+- "perplexity": Perplexity API key for web search
+- "anthropic": Anthropic API key
+- "ollama": Ollama URL and model
+
+The tool returns with awaiting_user_input=true. The user will fill out a form in the chat UI, then you can retry the operation.`,
+  parameters: z.object({
+    settings_key: z.enum(["email", "perplexity", "anthropic", "ollama"]).describe("Which settings to configure"),
+    reason: z.string().describe("Brief explanation of why this setting is needed"),
+  }),
+  execute: async ({ settings_key, reason }) => {
+    // This tool returns immediately - the frontend handles user interaction
+    return {
+      settings_key,
+      reason,
+      awaiting_user_input: true,
+    };
+  },
+});
+
+// =============================================================================
+// Embed Tool
+// =============================================================================
+
 const embedTool = tool({
   description: `Embed web content inline in the chat. Supports:
 - YouTube videos (youtube.com, youtu.be)
@@ -535,6 +1040,942 @@ Use this when sharing relevant media content or locations.`,
       title,
       ...embedInfo,
     };
+  },
+});
+
+// =============================================================================
+// Agent Task Management Tools
+// =============================================================================
+
+/**
+ * Context passed to agent tools during execution
+ */
+interface AgentToolContext {
+  sessionId?: string;
+  threadId?: string;
+  apiKey?: string;
+  perplexityApiKey?: string | null;
+}
+
+// Store for passing context to tools during a request
+let currentAgentContext: AgentToolContext = {};
+
+/**
+ * Set the current agent context for tool execution
+ */
+function setAgentContext(context: AgentToolContext): void {
+  currentAgentContext = context;
+}
+
+/**
+ * Get the current agent context
+ */
+function getAgentContext(): AgentToolContext {
+  return currentAgentContext;
+}
+
+const addTaskTool = tool({
+  description: `Add a task to track during this agent session.
+
+Use this to break down complex work into trackable steps.
+Each task should be specific and actionable.`,
+  parameters: z.object({
+    title: z.string().describe("Short task title"),
+    description: z.string().describe("Detailed description of what to do"),
+    type: z.enum(["plan", "explore", "execute"]).describe("Task category"),
+  }),
+  execute: async ({ title, description, type }) => {
+    const { sessionId } = getAgentContext();
+    if (!sessionId) {
+      return { error: "No active agent session" };
+    }
+    const task = addTaskToSession(sessionId, title, description, type);
+    return { taskId: task.id, status: "created" };
+  },
+});
+
+const setTaskTool = tool({
+  description: `Update a task's status.
+
+Use 'in_progress' when starting work on a task.
+Use 'done' when the task is complete.
+Use 'cancelled' if the task cannot be completed.`,
+  parameters: z.object({
+    taskId: z.string().describe("The task ID to update"),
+    status: z.enum(["staged", "in_progress", "done", "cancelled"]).describe("New status"),
+    result: z.unknown().optional().describe("Result data when marking done"),
+  }),
+  execute: async ({ taskId, status, result }) => {
+    const { sessionId } = getAgentContext();
+    if (!sessionId) {
+      return { error: "No active agent session" };
+    }
+    updateTaskStatus(sessionId, taskId, status, result);
+    return { taskId, status, updated: true };
+  },
+});
+
+const viewTasksTool = tool({
+  description: "View all tasks in the current agent session.",
+  parameters: z.object({
+    filter: z.enum(["all", "pending", "in_progress", "done"]).optional().describe("Filter by status"),
+  }),
+  execute: async ({ filter }) => {
+    const { sessionId } = getAgentContext();
+    if (!sessionId) {
+      return { error: "No active agent session", tasks: [] };
+    }
+    let tasks = getSessionTasks(sessionId);
+    if (filter && filter !== "all") {
+      const statusMap: Record<string, AgentTaskStatus[]> = {
+        pending: ["staged"],
+        in_progress: ["in_progress"],
+        done: ["done", "cancelled"],
+      };
+      const statuses = statusMap[filter];
+      tasks = tasks.filter(t => statuses.includes(t.status));
+    }
+    return {
+      tasks: tasks.map(t => ({
+        id: t.id,
+        title: t.title,
+        type: t.type,
+        status: t.status,
+      })),
+    };
+  },
+});
+
+const clearTasksTool = tool({
+  description: "Clear completed and cancelled tasks from the list.",
+  parameters: z.object({}),
+  execute: async () => {
+    const { sessionId } = getAgentContext();
+    if (!sessionId) {
+      return { error: "No active agent session" };
+    }
+    clearCompletedTasks(sessionId);
+    return { cleared: true };
+  },
+});
+
+/**
+ * Result from orchestration
+ */
+interface OrchestrationResult {
+  success: boolean;
+  summary: string;
+  tasksSummary: Array<{ title: string; type: string; status: string }>;
+  error?: string;
+}
+
+/**
+ * The complex tool - triggers the orchestration pipeline
+ * This is available to the main assistant to delegate complex tasks
+ */
+const complexTool = tool({
+  description: `Trigger the multi-agent orchestration system for complex tasks.
+
+Use this when a task requires:
+- Multiple steps or sub-tasks
+- Research or information gathering first
+- File modifications across multiple files
+- Parallel work streams
+- Breaking down into trackable progress
+
+Do NOT use for:
+- Simple questions or clarifications
+- Single-step operations
+- Small, direct edits
+
+This tool will plan and execute the task, then return the final result.
+Progress will be shown in the task panel while work is ongoing.`,
+  parameters: z.object({
+    task: z.string().describe("Description of the complex task to plan and execute"),
+  }),
+  execute: async ({ task }) => {
+    const { threadId, apiKey, perplexityApiKey } = getAgentContext();
+    if (!threadId) {
+      return { error: "No thread context available", success: false };
+    }
+
+    if (!apiKey) {
+      return { error: "No API key available for plan agent", success: false };
+    }
+
+    // Create a new agent session
+    const session = createAgentSession(threadId);
+
+    // Store task description for plan agent
+    session.planContent = task;
+
+    // Set context for plan agent tools (with sessionId)
+    setAgentContext({ sessionId: session.id, threadId, apiKey, perplexityApiKey });
+
+    try {
+      // Run the full orchestration pipeline and wait for completion
+      const result = await runOrchestrationPipeline(session, task, apiKey, perplexityApiKey);
+      return result;
+    } catch (err) {
+      console.error("[ComplexTool] Orchestration error:", err);
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : "Unknown error",
+        summary: "Orchestration failed",
+        tasksSummary: [],
+      };
+    }
+  },
+});
+
+/**
+ * Run the full orchestration pipeline (planning + execution)
+ * Returns the final result summary
+ */
+async function runOrchestrationPipeline(
+  session: AgentSession,
+  task: string,
+  apiKey: string,
+  perplexityApiKey: string | null | undefined
+): Promise<OrchestrationResult> {
+  // Run plan agent first
+  const planResult = await runPlanAgent(session, task, apiKey, perplexityApiKey);
+
+  if (!planResult.success) {
+    return {
+      success: false,
+      summary: planResult.summary,
+      tasksSummary: getTasksSummary(session),
+      error: planResult.error,
+    };
+  }
+
+  // If there are execute tasks, run the executor
+  const pendingExecuteTasks = Array.from(session.tasks.values())
+    .filter(t => t.type === "execute" && (t.status === "staged" || t.status === "in_progress"));
+
+  if (pendingExecuteTasks.length > 0) {
+    const execResult = await runExecutorAgent(session, apiKey, perplexityApiKey);
+    return {
+      success: execResult.success,
+      summary: execResult.summary,
+      tasksSummary: getTasksSummary(session),
+      error: execResult.error,
+    };
+  }
+
+  // No execute tasks - just return planning result
+  return {
+    success: true,
+    summary: planResult.summary,
+    tasksSummary: getTasksSummary(session),
+  };
+}
+
+/**
+ * Get a summary of all tasks in the session
+ */
+function getTasksSummary(session: AgentSession): Array<{ title: string; type: string; status: string }> {
+  return Array.from(session.tasks.values()).map(t => ({
+    title: t.title,
+    type: t.type,
+    status: t.status,
+  }));
+}
+
+/**
+ * Summarize findings tool - used by explore agents to return results
+ */
+const summarizeFindingsTool = tool({
+  description: "Submit your exploration findings. This ends your task and returns results to the parent agent.",
+  parameters: z.object({
+    summary: z.string().describe("Concise summary of what you found"),
+    details: z.string().optional().describe("Additional details if needed"),
+    sources: z.array(z.string()).optional().describe("URLs or file paths consulted"),
+  }),
+  execute: async ({ summary, details, sources }) => {
+    // This is captured by the parent orchestrator
+    return { summary, details, sources };
+  },
+});
+
+/**
+ * Report completion tool - used by executor sub-agents to report back
+ */
+const reportCompletionTool = tool({
+  description: "Report completion of your assigned tasks. This ends your work and returns results to the parent agent.",
+  parameters: z.object({
+    success: z.boolean().describe("Whether all tasks completed successfully"),
+    summary: z.string().describe("Summary of what was done"),
+    errors: z.array(z.string()).optional().describe("Any errors encountered"),
+  }),
+  execute: async ({ success, summary, errors }) => {
+    // This is captured by the parent orchestrator
+    return { success, summary, errors };
+  },
+});
+
+// =============================================================================
+// Sub-Agent System Prompts
+// =============================================================================
+
+const PLAN_AGENT_PROMPT = `You are a planning agent that analyzes complex tasks and creates execution plans.
+
+Your job:
+1. Analyze the user's complex request
+2. Break it down into discrete, actionable tasks
+3. Use the explore() tool to gather information if needed
+4. Use add_task() to create trackable tasks
+5. When done planning, summarize what will be done
+
+You have access to:
+- explore(prompts): Launch multiple explore agents to gather information in parallel
+- add_task(title, description, type): Add a task to track
+- set_task(taskId, status): Update task status
+- ask_user(question): Ask the user for clarification if needed
+
+Be thorough but efficient. Create clear, specific tasks that can be executed independently where possible.`;
+
+const EXPLORE_AGENT_PROMPT = `You are an autonomous exploration agent.
+
+IMPORTANT: You work COMPLETELY AUTONOMOUSLY.
+- You CANNOT ask questions or interact with humans
+- You CANNOT expect any user messages
+- You must complete your research independently
+
+You have access to tools for:
+- Web search (perplexity_ask, perplexity_research)
+- File reading (filesystem_read_file, filesystem_list_directory)
+- Web fetching (fetch_fetch)
+
+Research thoroughly, then call summarize_findings() with a concise summary.
+Focus on facts and specific details. Be concise but complete.`;
+
+const SUB_EXECUTOR_PROMPT = `You are an autonomous executor sub-agent.
+
+IMPORTANT: You work COMPLETELY AUTONOMOUSLY.
+- You CANNOT ask questions or interact with humans
+- You CANNOT expect any user messages
+- You must complete your tasks independently or report failure
+
+Your job:
+1. Execute the assigned tasks using available tools
+2. Call set_task(taskId, 'in_progress') when starting a task
+3. Call set_task(taskId, 'done') when completing a task
+4. Call report_completion() when finished with all tasks
+
+If you encounter a blocking issue you cannot resolve:
+1. Call set_task(taskId, 'cancelled') with reason
+2. Call report_completion(success: false, errors: [...])`;
+
+const EXECUTOR_AGENT_PROMPT = `You are the main executor agent. You execute the tasks that were created during planning.
+
+Your job:
+1. Review the pending tasks using view_tasks()
+2. For tasks that can be parallelized, use execute() to spawn sub-agents
+3. For tasks that need sequential execution or coordination, execute them yourself
+4. Mark tasks as in_progress before starting, and done when complete
+5. You CAN use ask_user if you need clarification from the user
+
+Available tools:
+- view_tasks: See all tasks and their status
+- set_task: Update task status (in_progress, done, cancelled)
+- execute: Spawn parallel sub-agents for independent work streams
+- All MCP tools (filesystem, fetch, etc.)
+- ask_user: Ask the user for clarification if needed
+
+Execute all pending tasks, then report completion.`;
+
+// =============================================================================
+// Plan Agent Execution
+// =============================================================================
+
+/**
+ * Result from an agent run
+ */
+interface AgentRunResult {
+  success: boolean;
+  summary: string;
+  error?: string;
+}
+
+/**
+ * Run the plan agent and broadcast tool calls
+ * Returns result when planning is complete
+ */
+async function runPlanAgent(
+  session: AgentSession,
+  task: string,
+  apiKey: string,
+  perplexityApiKey: string | null | undefined
+): Promise<AgentRunResult> {
+  const anthropic = createAnthropic({ apiKey });
+  const model = anthropic("claude-sonnet-4-20250514");
+  const threadId = session.threadId;
+
+  // Get MCP tools
+  const mcpTools = getMCPToolsForAISDK();
+  const perplexityTools = createPerplexityTools(perplexityApiKey);
+
+  // Build tools for plan agent (filter out undefined tools)
+  const planAgentTools: Record<string, CoreTool> = {
+    add_task: addTaskTool,
+    set_task: setTaskTool,
+    view_tasks: viewTasksTool,
+    explore: exploreTool,
+    ask_user: askUserTool,
+    ...mcpTools,
+  };
+  // Add perplexity tools if available
+  for (const [name, tool] of Object.entries(perplexityTools)) {
+    if (tool !== undefined) {
+      planAgentTools[name] = tool;
+    }
+  }
+
+  try {
+    console.log(`[PlanAgent] Starting for session ${session.id}, task: ${task.slice(0, 100)}...`);
+
+    // Use streamText so we can broadcast tool calls as they happen
+    const result = streamText({
+      model,
+      system: PLAN_AGENT_PROMPT + `\n\nThe task to plan:\n${task}`,
+      messages: [{ role: "user", content: "Begin planning this task now. Break it down into actionable steps. When done, provide a summary of the plan." }],
+      tools: planAgentTools,
+      maxSteps: 15,
+    });
+
+    // Collect final text for summary
+    let finalText = "";
+
+    // Stream and broadcast tool calls
+    for await (const part of result.fullStream) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const p = part as any;
+
+      if (p.type === "text-delta") {
+        finalText += p.textDelta as string;
+      } else if (p.type === "tool-call") {
+        const toolCallId = p.toolCallId as string;
+        const toolName = p.toolName as string;
+        const args = p.args;
+
+        console.log(`[PlanAgent] Tool call: ${toolName}`);
+
+        // Broadcast tool call
+        broadcastToThread(threadId, {
+          type: "tool_call",
+          sessionId: session.id,
+          threadId,
+          toolCall: {
+            id: toolCallId,
+            toolName,
+            status: "calling",
+            args: args as Record<string, unknown> | undefined,
+          },
+        });
+      } else if (p.type === "tool-result") {
+        const toolCallId = p.toolCallId as string;
+        const toolName = p.toolName as string;
+
+        console.log(`[PlanAgent] Tool result: ${toolName}`);
+
+        // Broadcast tool result
+        broadcastToThread(threadId, {
+          type: "tool_result",
+          sessionId: session.id,
+          threadId,
+          toolCall: {
+            id: toolCallId,
+            toolName,
+            status: "done",
+            result: typeof p.result === "string" ? p.result : JSON.stringify(p.result),
+          },
+        });
+      }
+    }
+
+    // Check if there are pending execute tasks
+    const tasks = Array.from(session.tasks.values());
+    const pendingExecuteTasks = tasks.filter(
+      (t) => t.type === "execute" && (t.status === "staged" || t.status === "in_progress")
+    );
+
+    if (pendingExecuteTasks.length > 0) {
+      // Planning done, but execution tasks remain - set to "executing"
+      session.status = "executing";
+      broadcastToThread(threadId, {
+        type: "session_updated",
+        sessionId: session.id,
+        threadId,
+        session: { id: session.id, status: session.status },
+      });
+      console.log(`[PlanAgent] Planning complete, ${pendingExecuteTasks.length} execute tasks pending`);
+    }
+
+    const summary = finalText || `Planning complete. Created ${tasks.length} tasks.`;
+    console.log(`[PlanAgent] Completed for session ${session.id}`);
+
+    return { success: true, summary };
+  } catch (error) {
+    console.error(`[PlanAgent] Error:`, error);
+    const errorMsg = error instanceof Error ? error.message : "Unknown error";
+
+    // Clean up any in_progress tasks
+    cleanupIncompleteTasks(session, `Planning error: ${errorMsg}`);
+
+    session.status = "error";
+    session.error = errorMsg;
+    broadcastToThread(threadId, {
+      type: "session_error",
+      sessionId: session.id,
+      threadId,
+      session: { id: session.id, status: session.status, error: session.error },
+    });
+    return { success: false, summary: "Planning failed", error: errorMsg };
+  }
+}
+
+/**
+ * Run the executor agent to execute pending tasks
+ * Returns result when execution is complete
+ */
+async function runExecutorAgent(
+  session: AgentSession,
+  apiKey: string,
+  perplexityApiKey: string | null | undefined
+): Promise<AgentRunResult> {
+  const anthropic = createAnthropic({ apiKey });
+  const model = anthropic("claude-sonnet-4-20250514");
+  const threadId = session.threadId;
+
+  // Set context for task tools
+  setAgentContext({ sessionId: session.id, threadId, apiKey, perplexityApiKey });
+
+  // Get MCP tools
+  const mcpTools = getMCPToolsForAISDK();
+  const perplexityTools = createPerplexityTools(perplexityApiKey);
+
+  // Build tools for executor agent (filter out undefined tools)
+  const executorTools: Record<string, CoreTool> = {
+    view_tasks: viewTasksTool,
+    set_task: setTaskTool,
+    execute: executeTool,
+    ask_user: askUserTool,  // Executor CAN ask user
+    ...mcpTools,
+  };
+  // Add perplexity tools if available
+  for (const [name, tool] of Object.entries(perplexityTools)) {
+    if (tool !== undefined) {
+      executorTools[name] = tool;
+    }
+  }
+
+  // Get current pending tasks for context
+  const pendingTasks = Array.from(session.tasks.values())
+    .filter(t => t.type === "execute" && (t.status === "staged" || t.status === "in_progress"));
+
+  const taskList = pendingTasks.map(t => `- [${t.id}] ${t.title}: ${t.description}`).join("\n");
+
+  try {
+    console.log(`[ExecutorAgent] Starting for session ${session.id}, ${pendingTasks.length} pending tasks`);
+
+    // Use streamText so we can broadcast tool calls as they happen
+    const result = streamText({
+      model,
+      system: EXECUTOR_AGENT_PROMPT + `\n\nPending execute tasks:\n${taskList}`,
+      messages: [{ role: "user", content: "Execute all pending tasks now. Mark each task as in_progress before starting and done when complete. When finished, provide a summary of what was accomplished." }],
+      tools: executorTools,
+      maxSteps: 30,  // More steps for execution
+    });
+
+    // Collect final text for summary
+    let finalText = "";
+
+    // Stream and broadcast tool calls
+    for await (const part of result.fullStream) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const p = part as any;
+
+      if (p.type === "text-delta") {
+        finalText += p.textDelta as string;
+      } else if (p.type === "tool-call") {
+        const toolCallId = p.toolCallId as string;
+        const toolName = p.toolName as string;
+        const args = p.args;
+
+        console.log(`[ExecutorAgent] Tool call: ${toolName}`);
+
+        // Broadcast tool call
+        broadcastToThread(threadId, {
+          type: "tool_call",
+          sessionId: session.id,
+          threadId,
+          toolCall: {
+            id: toolCallId,
+            toolName,
+            status: "calling",
+            args: args as Record<string, unknown> | undefined,
+          },
+        });
+      } else if (p.type === "tool-result") {
+        const toolCallId = p.toolCallId as string;
+        const toolName = p.toolName as string;
+
+        console.log(`[ExecutorAgent] Tool result: ${toolName}`);
+
+        // Broadcast tool result
+        broadcastToThread(threadId, {
+          type: "tool_result",
+          sessionId: session.id,
+          threadId,
+          toolCall: {
+            id: toolCallId,
+            toolName,
+            status: "done",
+            result: typeof p.result === "string" ? p.result : JSON.stringify(p.result),
+          },
+        });
+      }
+    }
+
+    // Check if all execute tasks are done
+    const remainingTasks = Array.from(session.tasks.values())
+      .filter(t => t.type === "execute" && (t.status === "staged" || t.status === "in_progress"));
+    const completedTasks = Array.from(session.tasks.values())
+      .filter(t => t.status === "done");
+
+    if (remainingTasks.length === 0) {
+      session.status = "complete";
+      broadcastToThread(threadId, {
+        type: "session_complete",
+        sessionId: session.id,
+        threadId,
+        session: { id: session.id, status: session.status },
+      });
+      console.log(`[ExecutorAgent] All tasks completed for session ${session.id}`);
+    } else {
+      // Mark remaining in_progress tasks as cancelled since we're done
+      cleanupIncompleteTasks(session, "Executor finished without completing this task");
+      console.log(`[ExecutorAgent] ${remainingTasks.length} tasks still pending, marked as cancelled`);
+    }
+
+    const summary = finalText || `Execution complete. Completed ${completedTasks.length} tasks.`;
+    return { success: remainingTasks.length === 0, summary };
+  } catch (error) {
+    console.error(`[ExecutorAgent] Error:`, error);
+    const errorMsg = error instanceof Error ? error.message : "Unknown error";
+
+    // Clean up any in_progress tasks
+    cleanupIncompleteTasks(session, `Error: ${errorMsg}`);
+
+    session.status = "error";
+    session.error = errorMsg;
+    broadcastToThread(threadId, {
+      type: "session_error",
+      sessionId: session.id,
+      threadId,
+      session: { id: session.id, status: session.status, error: session.error },
+    });
+    return { success: false, summary: "Execution failed", error: errorMsg };
+  }
+}
+
+/**
+ * Clean up incomplete tasks when session ends
+ * Marks in_progress tasks as cancelled
+ */
+function cleanupIncompleteTasks(session: AgentSession, reason: string): void {
+  const threadId = session.threadId;
+
+  for (const task of session.tasks.values()) {
+    if (task.status === "in_progress") {
+      task.status = "cancelled";
+      task.completedAt = new Date();
+      task.result = reason;
+
+      // Broadcast the update
+      broadcastToThread(threadId, {
+        type: "task_updated",
+        sessionId: session.id,
+        threadId,
+        task,
+      });
+    }
+  }
+}
+
+// =============================================================================
+// Explore & Execute Tools (for Plan/Executor Agents)
+// =============================================================================
+
+/**
+ * Execute an explore agent with a specific prompt
+ * Returns the summary from summarize_findings call
+ */
+async function runExploreAgent(
+  prompt: string,
+  apiKey: string,
+  perplexityApiKey: string | null | undefined,
+  mcpToolsForAgent: Record<string, CoreTool>
+): Promise<string> {
+  const anthropic = createAnthropic({ apiKey });
+  const model = anthropic("claude-sonnet-4-20250514");
+
+  // Build tools for explore agent (no ask_user - autonomous)
+  const perplexityTools = createPerplexityTools(perplexityApiKey);
+  const exploreTools: Record<string, CoreTool> = {
+    summarize_findings: summarizeFindingsTool,
+    ...mcpToolsForAgent,
+  };
+  // Add perplexity tools if available
+  for (const [name, tool] of Object.entries(perplexityTools)) {
+    if (tool !== undefined) {
+      exploreTools[name] = tool;
+    }
+  }
+
+  const result = await generateText({
+    model,
+    system: EXPLORE_AGENT_PROMPT + `\n\nYour exploration task:\n${prompt}`,
+    messages: [{ role: "user", content: "Begin your research now." }],
+    tools: exploreTools,
+    maxSteps: 10,
+  });
+
+  // Extract summary from summarize_findings call
+  const summaryCall = result.toolCalls?.find(c => c.toolName === "summarize_findings");
+  const args = summaryCall?.args as { summary?: string } | undefined;
+  return args?.summary ?? result.text;
+}
+
+/**
+ * Execute an executor sub-agent with assigned tasks
+ * Returns the completion report
+ */
+async function runExecutorSubAgent(
+  taskIds: string[],
+  context: string,
+  sessionId: string,
+  apiKey: string,
+  mcpToolsForAgent: Record<string, CoreTool>
+): Promise<{ taskIds: string[]; success: boolean; summary: string; errors?: string[] }> {
+  const anthropic = createAnthropic({ apiKey });
+  const model = anthropic("claude-sonnet-4-20250514");
+
+  // Set context for task tools (include apiKey for nested sub-agent spawning)
+  const session = agentSessions.get(sessionId);
+  setAgentContext({ sessionId, threadId: session?.threadId, apiKey });
+
+  // Build tools for executor sub-agent (no ask_user - autonomous)
+  const executorTools = {
+    ...mcpToolsForAgent,
+    set_task: setTaskTool,
+    report_completion: reportCompletionTool,
+  };
+
+  const result = await generateText({
+    model,
+    system: SUB_EXECUTOR_PROMPT + `\n\nAssigned tasks: ${taskIds.join(", ")}\n\nContext:\n${context}`,
+    messages: [{ role: "user", content: "Execute your assigned tasks now." }],
+    tools: executorTools,
+    maxSteps: 20,
+  });
+
+  // Extract report from report_completion call
+  const reportCall = result.toolCalls?.find(c => c.toolName === "report_completion");
+  const reportArgs = reportCall?.args as { success?: boolean; summary?: string; errors?: string[] } | undefined;
+  const success = reportArgs?.success ?? false;
+  const summary = reportArgs?.summary ?? result.text;
+  const errors = reportArgs?.errors;
+
+  return { taskIds, success, summary, errors };
+}
+
+/**
+ * The explore tool - spawns concurrent explore sub-agents
+ * Used by the Plan Agent to gather information
+ */
+const exploreTool = tool({
+  description: `Launch multiple explore agents concurrently to gather information.
+Each prompt spawns a separate autonomous agent that researches and returns findings.
+This tool blocks until all agents complete.
+
+Use this to gather information in parallel before planning.`,
+  parameters: z.object({
+    prompts: z.array(z.string()).describe("Array of exploration prompts, one per agent"),
+  }),
+  execute: async ({ prompts }) => {
+    const { sessionId, threadId, apiKey, perplexityApiKey } = getAgentContext();
+    const session = sessionId ? agentSessions.get(sessionId) : undefined;
+
+    // Use API key from context
+    if (!apiKey) {
+      return { error: "No API key available for sub-agents", results: [] };
+    }
+
+    // Broadcast explore start
+    if (threadId) {
+      broadcastToThread(threadId, {
+        type: "explore_started",
+        sessionId: sessionId ?? "",
+        threadId,
+        count: prompts.length,
+        prompts,
+      });
+    }
+
+    // Update session status
+    if (session) {
+      updateSessionStatus(sessionId!, "exploring");
+    }
+
+    // Get MCP tools for sub-agents
+    const mcpToolsForAgent = getMCPToolsForAISDK();
+
+    // Spawn all explore agents concurrently
+    const results = await Promise.all(
+      prompts.map(async (prompt, index) => {
+        // Broadcast individual agent start
+        if (threadId) {
+          broadcastToThread(threadId, {
+            type: "sub_agent_started",
+            sessionId: sessionId ?? "",
+            threadId,
+            index,
+            prompt,
+          });
+        }
+
+        try {
+          const summary = await runExploreAgent(prompt, apiKey, perplexityApiKey, mcpToolsForAgent);
+
+          // Broadcast completion
+          if (threadId) {
+            broadcastToThread(threadId, {
+              type: "sub_agent_done",
+              sessionId: sessionId ?? "",
+              threadId,
+              index,
+              summary,
+            });
+          }
+
+          return summary;
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : "Unknown error";
+          if (threadId) {
+            broadcastToThread(threadId, {
+              type: "sub_agent_done",
+              sessionId: sessionId ?? "",
+              threadId,
+              index,
+              summary: `Error: ${errorMsg}`,
+            });
+          }
+          return `Error exploring: ${errorMsg}`;
+        }
+      })
+    );
+
+    // Broadcast all exploration complete
+    if (threadId) {
+      broadcastToThread(threadId, {
+        type: "explore_complete",
+        sessionId: sessionId ?? "",
+        threadId,
+        results,
+      });
+    }
+
+    return { results };
+  },
+});
+
+/**
+ * The execute tool - spawns concurrent executor sub-agents
+ * Used by the Executor Agent to parallelize work
+ */
+const executeTool = tool({
+  description: `Delegate tasks to parallel executor sub-agents.
+Each sub-agent works AUTONOMOUSLY (no human interaction).
+Assign tasks by ID so sub-agents can mark them complete.
+
+Use this to parallelize independent work streams.`,
+  parameters: z.object({
+    assignments: z.array(z.object({
+      tasks: z.array(z.string()).describe("Task IDs to assign to this sub-agent"),
+      context: z.string().describe("Instructions and context for the sub-agent"),
+    })).describe("Array of task assignments, one per sub-agent"),
+  }),
+  execute: async ({ assignments }) => {
+    const { sessionId, threadId, apiKey } = getAgentContext();
+
+    // Use API key from context
+    if (!apiKey) {
+      return { error: "No API key available for sub-agents", results: [] };
+    }
+
+    if (!sessionId) {
+      return { error: "No active agent session", results: [] };
+    }
+
+    // Update session status
+    updateSessionStatus(sessionId, "executing");
+
+    // Get MCP tools for sub-agents
+    const mcpToolsForAgent = getMCPToolsForAISDK();
+
+    // Spawn all executor sub-agents concurrently
+    const results = await Promise.all(
+      assignments.map(async ({ tasks, context }, index) => {
+        // Broadcast sub-executor start
+        if (threadId) {
+          broadcastToThread(threadId, {
+            type: "sub_executor_started",
+            sessionId,
+            threadId,
+            index,
+            taskIds: tasks,
+          });
+        }
+
+        try {
+          const result = await runExecutorSubAgent(tasks, context, sessionId, apiKey, mcpToolsForAgent);
+
+          // Broadcast completion
+          if (threadId) {
+            broadcastToThread(threadId, {
+              type: "sub_executor_done",
+              sessionId,
+              threadId,
+              index,
+              taskIds: tasks,
+              summary: result.summary,
+              success: result.success,
+            });
+          }
+
+          return result;
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : "Unknown error";
+          if (threadId) {
+            broadcastToThread(threadId, {
+              type: "sub_executor_done",
+              sessionId,
+              threadId,
+              index,
+              taskIds: tasks,
+              summary: `Error: ${errorMsg}`,
+              success: false,
+            });
+          }
+          return { taskIds: tasks, success: false, summary: `Error: ${errorMsg}`, errors: [errorMsg] };
+        }
+      })
+    );
+
+    return { results };
   },
 });
 
@@ -640,6 +2081,88 @@ app.use("/*", cors({
 // Health check
 app.get("/health", (c) => c.json({ status: "ok" }));
 
+// Test email connection by connecting the MCP server and invoking read/send tools
+app.post("/api/email/test", async (c) => {
+  try {
+    const body = await c.req.json() as { emailConfig?: EmailConfig };
+    const emailConfig = body.emailConfig;
+    if (!emailConfig?.address || !emailConfig?.password) {
+      return c.json({ success: false, error: "Email address and password are required" }, 400);
+    }
+    // Force reconnect by clearing the cached config
+    lastEmailConfig = null;
+    emailMCPConnected = false;
+    await connectEmailMCPIfNeeded(emailConfig);
+    if (!emailMCPConnected) {
+      return c.json({ success: false, error: "Failed to start email server" });
+    }
+
+    const connection = mcpConnections.get("email");
+    if (!connection) {
+      return c.json({ success: false, error: "Email server not available" });
+    }
+
+    const errors: string[] = [];
+
+    // Test IMAP by listing emails (triggers real IMAP auth)
+    const imapTool = connection.tools.has("list_emails") ? "list_emails" :
+                     connection.tools.has("fetch_emails") ? "fetch_emails" : null;
+    if (imapTool) {
+      try {
+        const schema = connection.tools.get(imapTool)?.inputSchema;
+        const args: Record<string, unknown> = {};
+        const required = (schema as { required?: string[] })?.required ?? [];
+        if (required.includes("account_name")) args.account_name = "default";
+        if (required.includes("pageSize") || !required.includes("limit")) args.pageSize = 1;
+        else args.limit = 1;
+
+        const result = await connection.client.callTool({ name: imapTool, arguments: args });
+        const content = result.content as Array<{ type: string; text?: string }>;
+        const errorText = content?.find((c) => c.type === "text" && c.text?.includes("Error"))?.text;
+        if (result.isError || errorText) {
+          errors.push(`IMAP: ${errorText ?? "Unknown error"}`);
+        }
+      } catch (err) {
+        errors.push(`IMAP: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    // Test SMTP by sending a test email to self (triggers real SMTP auth)
+    const smtpTool = connection.tools.has("send_email") ? "send_email" : null;
+    if (smtpTool) {
+      try {
+        const schema = connection.tools.get(smtpTool)?.inputSchema;
+        const required = (schema as { required?: string[] })?.required ?? [];
+        const args: Record<string, unknown> = {
+          subject: "AIOS Connection Test",
+          body: "This is an automated connection test from AIOS Chat. You can safely delete this email.",
+        };
+        // Adapt to whichever field names the schema requires
+        if (required.includes("account_name")) args.account_name = "default";
+        if (required.includes("recipients")) args.recipients = [emailConfig.address];
+        if (required.includes("to")) args.to = emailConfig.address;
+
+        const result = await connection.client.callTool({ name: smtpTool, arguments: args });
+        const content = result.content as Array<{ type: string; text?: string }>;
+        const errorText = content?.find((c) => c.type === "text" && c.text?.includes("Error"))?.text;
+        if (result.isError || errorText) {
+          errors.push(`SMTP: ${errorText ?? "Unknown error"}`);
+        }
+      } catch (err) {
+        errors.push(`SMTP: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    if (errors.length > 0) {
+      return c.json({ success: false, error: errors.join("; ") });
+    }
+    return c.json({ success: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return c.json({ success: false, error: message });
+  }
+});
+
 // Get system prompt (for debugging)
 app.get("/api/system-prompt", (c) => {
   const hasMCPTools = mcpConnections.size > 0;
@@ -659,6 +2182,38 @@ app.get("/api/mcp/status", (c) => {
   }
 
   return c.json({ servers: status });
+});
+
+// Get agent session for a thread
+app.get("/api/agent/session/:threadId", (c) => {
+  const threadId = c.req.param("threadId");
+  const session = getSessionByThread(threadId);
+
+  if (!session) {
+    return c.json({ session: null, tasks: [] });
+  }
+
+  return c.json({
+    session: {
+      id: session.id,
+      threadId: session.threadId,
+      status: session.status,
+      error: session.error,
+      createdAt: session.createdAt.toISOString(),
+      lastActivityAt: session.lastActivityAt.toISOString(),
+    },
+    tasks: Array.from(session.tasks.values()).map(t => ({
+      id: t.id,
+      title: t.title,
+      description: t.description,
+      type: t.type,
+      status: t.status,
+      result: t.result,
+      createdAt: t.createdAt.toISOString(),
+      startedAt: t.startedAt?.toISOString(),
+      completedAt: t.completedAt?.toISOString(),
+    })),
+  });
 });
 
 // =============================================================================
@@ -953,23 +2508,35 @@ app.post("/api/chat", async (c) => {
 
   const body = await c.req.json<{
     messages: ChatIncomingMessage[];
+    threadId?: string;
     apiKey?: string;
     perplexityApiKey?: string | null;
     model?: string;
     enableTools?: boolean;
     provider?: "anthropic" | "ollama";
     ollamaBaseUrl?: string;
+    emailConfig?: EmailConfig;
   }>();
 
   const {
     messages: incomingMessages,
+    threadId,
     apiKey,
     perplexityApiKey,
     model,
     enableTools = true,
     provider: providerType = "anthropic",
     ollamaBaseUrl = "http://localhost:11434",
+    emailConfig,
   } = body;
+
+  // Connect email MCP server if credentials are provided
+  if (emailConfig?.address && emailConfig?.password) {
+    await connectEmailMCPIfNeeded(emailConfig);
+  }
+
+  // Set agent context for tool execution (includes API keys for plan agent)
+  setAgentContext({ threadId, apiKey, perplexityApiKey });
 
   // Create the appropriate model based on provider
   let aiModel: LanguageModelV1;
@@ -995,6 +2562,8 @@ app.post("/api/chat", async (c) => {
   const allTools = enableTools ? {
     ask_user: askUserTool,
     embed: embedTool,
+    configure_settings: configureSettingsTool,  // For inline settings configuration
+    complex: complexTool,  // For triggering multi-agent orchestration
     ...perplexityTools,
     ...mcpTools,
   } : {};
@@ -1032,17 +2601,19 @@ app.post("/api/chat", async (c) => {
   );
 
   // Convert processed messages to AI SDK CoreMessage format
-  const messages: Array<
+  type CoreMessage =
     | { role: "user"; content: string }
     | { role: "assistant"; content: string | Array<{ type: "text"; text: string } | { type: "tool-call"; toolCallId: string; toolName: string; args: Record<string, unknown> }> }
-    | { role: "tool"; content: Array<{ type: "tool-result"; toolCallId: string; toolName: string; result: unknown }> }
-  > = [];
+    | { role: "tool"; content: Array<{ type: "tool-result"; toolCallId: string; toolName: string; result: unknown }> };
+
+  const rawMessages: CoreMessage[] = [];
 
   for (const msg of processedMessages) {
     if (msg.role === "assistant" && msg.toolInvocations && msg.toolInvocations.length > 0) {
       // Assistant message with tool calls
       const content: Array<{ type: "text"; text: string } | { type: "tool-call"; toolCallId: string; toolName: string; args: Record<string, unknown> }> = [];
-      if (msg.content) {
+      // Only add text block if content is non-empty (Anthropic requires non-empty text blocks)
+      if (msg.content && msg.content.trim() !== "") {
         content.push({ type: "text", text: msg.content });
       }
       for (const inv of msg.toolInvocations) {
@@ -1053,7 +2624,7 @@ app.post("/api/chat", async (c) => {
           args: inv.args,
         });
       }
-      messages.push({ role: "assistant", content });
+      rawMessages.push({ role: "assistant", content });
     } else if (msg.role === "user" && msg.toolResults && msg.toolResults.length > 0) {
       // User message with tool results - send as tool role
       // Find corresponding tool invocations to get toolName
@@ -1063,7 +2634,7 @@ app.post("/api/chat", async (c) => {
         )
         .flatMap((m) => m.toolInvocations);
 
-      messages.push({
+      rawMessages.push({
         role: "tool",
         content: msg.toolResults.map((r) => {
           const invocation = toolInvocations.find((inv) => inv.toolCallId === r.toolCallId);
@@ -1077,14 +2648,129 @@ app.post("/api/chat", async (c) => {
       });
       // If there's also text content, add it as a separate user message
       if (msg.content) {
-        messages.push({ role: "user", content: msg.content });
+        rawMessages.push({ role: "user", content: msg.content });
       }
     } else if (msg.role === "user") {
-      messages.push({ role: "user", content: msg.content });
+      rawMessages.push({ role: "user", content: msg.content });
     } else if (msg.role === "assistant") {
-      messages.push({ role: "assistant", content: msg.content });
+      rawMessages.push({ role: "assistant", content: msg.content });
     }
   }
+
+  // Post-process messages:
+  // 1. Ensure tool calls have corresponding tool results (add synthetic ones if missing)
+  // 2. Filter out messages with empty content (except tool messages and assistant with tool calls)
+  // 3. Merge consecutive user messages with timestamps
+
+  // First pass: Find tool calls that need synthetic results
+  // This handles configure_settings which doesn't have a continuation mechanism like ask_user
+  const processedWithToolResults: CoreMessage[] = [];
+  for (let i = 0; i < rawMessages.length; i++) {
+    const msg = rawMessages[i];
+    processedWithToolResults.push(msg);
+
+    // Check if this is an assistant message with tool calls
+    if (msg.role === "assistant" && Array.isArray(msg.content)) {
+      const toolCalls = msg.content.filter(
+        (part): part is { type: "tool-call"; toolCallId: string; toolName: string; args: Record<string, unknown> } =>
+          part.type === "tool-call"
+      );
+
+      if (toolCalls.length > 0) {
+        // Check if the next message is a tool result
+        const nextMsg = rawMessages[i + 1];
+        const hasToolResult = nextMsg?.role === "tool";
+
+        if (!hasToolResult) {
+          // Add synthetic tool results for missing tool calls
+          const syntheticResults = toolCalls.map((tc) => {
+            let result: unknown;
+            if (tc.toolName === "configure_settings") {
+              // User saved settings and continued the conversation
+              result = { configured: true, message: "Settings have been saved by the user." };
+            } else if (tc.toolName === "ask_user") {
+              // User didn't answer and sent a new message instead
+              result = { skipped: true, message: "User sent a new message without answering." };
+            } else {
+              // Generic synthetic result for other tools
+              result = { completed: true };
+            }
+            return {
+              type: "tool-result" as const,
+              toolCallId: tc.toolCallId,
+              toolName: tc.toolName,
+              result,
+            };
+          });
+
+          processedWithToolResults.push({
+            role: "tool",
+            content: syntheticResults,
+          });
+          console.log(`[Messages] Added synthetic tool results for: ${toolCalls.map(tc => tc.toolName).join(", ")}`);
+        }
+      }
+    }
+  }
+
+  const messages: CoreMessage[] = [];
+  let pendingUserMessages: string[] = [];
+
+  function flushPendingUserMessages(): void {
+    if (pendingUserMessages.length === 0) return;
+
+    if (pendingUserMessages.length === 1) {
+      messages.push({ role: "user", content: pendingUserMessages[0] });
+    } else {
+      // Combine multiple user messages with timestamps
+      const now = new Date();
+      const combined = pendingUserMessages.map((content, idx) => {
+        // Calculate approximate timestamp (subtract seconds for earlier messages)
+        const msgTime = new Date(now.getTime() - (pendingUserMessages.length - 1 - idx) * 30000);
+        const timeStr = msgTime.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+        return `[${timeStr}] ${content}`;
+      }).join("\n\n");
+      messages.push({ role: "user", content: combined });
+    }
+    pendingUserMessages = [];
+  }
+
+  for (const msg of processedWithToolResults) {
+    if (msg.role === "user") {
+      // Skip empty user messages
+      if (typeof msg.content === "string" && msg.content.trim() === "") {
+        continue;
+      }
+      pendingUserMessages.push(msg.content as string);
+    } else {
+      // Flush any pending user messages before adding non-user message
+      flushPendingUserMessages();
+
+      if (msg.role === "assistant") {
+        // Skip empty assistant messages (but allow those with tool calls)
+        if (typeof msg.content === "string" && msg.content.trim() === "") {
+          continue;
+        }
+        if (Array.isArray(msg.content) && msg.content.length === 0) {
+          continue;
+        }
+      }
+      messages.push(msg);
+    }
+  }
+  // Flush any remaining user messages
+  flushPendingUserMessages();
+
+  // Debug: log final messages being sent
+  console.log(`[Messages] Final count: ${messages.length}`);
+  messages.forEach((m, i) => {
+    const contentPreview = typeof m.content === "string"
+      ? m.content.slice(0, 50)
+      : Array.isArray(m.content)
+        ? `[${m.content.length} parts]`
+        : JSON.stringify(m.content).slice(0, 50);
+    console.log(`[Messages] ${i}: ${m.role} - ${contentPreview}`);
+  });
 
   const useTools = enableTools && Object.keys(allTools).length > 0;
 
@@ -1121,6 +2807,12 @@ app.post("/api/chat", async (c) => {
           const systemChars = systemPrompt?.length ?? 0;
           const estimatedTokens = Math.ceil((msgChars + toolsChars + systemChars) / 2);
           console.log(`[Step ${step + 1}] Messages: ${currentMessages.length} (${msgChars} chars), Est. tokens: ${estimatedTokens}`);
+          // Debug: log last message to see what's being sent
+          if (currentMessages.length > 0) {
+            const lastMsg = currentMessages[currentMessages.length - 1];
+            console.log(`[Step ${step + 1}] Last message role: ${lastMsg.role}, content preview:`,
+              typeof lastMsg.content === "string" ? lastMsg.content.slice(0, 100) : JSON.stringify(lastMsg.content).slice(0, 100));
+          }
 
           // Trim context if needed
           const maxContextTokens = 180000;
@@ -1164,6 +2856,10 @@ app.post("/api/chat", async (c) => {
           for await (const part of result.fullStream) {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const p = part as any;
+            // Debug: log all event types
+            if (p.type !== "text-delta") {
+              console.log(`[Step ${step + 1}] Event: ${p.type}`, p.type === "error" ? p : "");
+            }
             if (p.type === "text-delta") {
               const textDelta = p.textDelta as string;
               stepText += textDelta;
@@ -1179,6 +2875,24 @@ app.post("/api/chat", async (c) => {
                 toolName,
                 args,
               })}\n`));
+
+              // Broadcast to WebSocket if session exists
+              if (threadId) {
+                const session = getSessionByThread(threadId);
+                if (session) {
+                  broadcastToThread(threadId, {
+                    type: "tool_call",
+                    sessionId: session.id,
+                    threadId,
+                    toolCall: {
+                      id: toolCallId,
+                      toolName,
+                      status: "calling",
+                      args: args as Record<string, unknown> | undefined,
+                    },
+                  });
+                }
+              }
             } else if (p.type === "tool-result") {
               const toolCallId = p.toolCallId as string;
               // Truncate tool result before storing/streaming
@@ -1189,6 +2903,24 @@ app.post("/api/chat", async (c) => {
                 toolCallId,
                 result: truncatedResult,
               })}\n`));
+
+              // Broadcast to WebSocket if session exists
+              if (threadId) {
+                const session = getSessionByThread(threadId);
+                if (session) {
+                  broadcastToThread(threadId, {
+                    type: "tool_result",
+                    sessionId: session.id,
+                    threadId,
+                    toolCall: {
+                      id: toolCallId,
+                      toolName: stepToolCalls.find(tc => tc.toolCallId === toolCallId)?.toolName ?? "unknown",
+                      status: "done",
+                      result: typeof truncatedResult === "string" ? truncatedResult : JSON.stringify(truncatedResult),
+                    },
+                  });
+                }
+              }
             } else if (p.type === "finish") {
               const usage = p.usage as { promptTokens: number; completionTokens: number } | undefined;
               if (usage) {
@@ -1199,6 +2931,15 @@ app.post("/api/chat", async (c) => {
           }
 
           console.log(`[Step ${step + 1}] Completed: ${stepText.length} chars text, ${stepToolCalls.length} tool calls`);
+
+          // Check if ask_user was called - need to pause and wait for user input
+          const hasAskUser = stepToolCalls.some(tc => tc.toolName === "ask_user");
+          if (hasAskUser) {
+            console.log(`[Step ${step + 1}] ask_user called, pausing for user input`);
+            // Don't add the tool results to messages - frontend will handle continuation
+            // Just break out of the loop so frontend can show the question
+            break;
+          }
 
           // If there were tool calls, prepare for next step
           if (stepToolCalls.length > 0) {

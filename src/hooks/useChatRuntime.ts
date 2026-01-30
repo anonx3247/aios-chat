@@ -156,7 +156,7 @@ export function useChatRuntime({
       const requestThreadId = threadId;
 
       // Check for API key
-      const apiKey = getApiKey();
+      const apiKey = await getApiKey();
       if (apiKey === null || apiKey === "") {
         await saveMessage({
           role: "assistant",
@@ -259,19 +259,30 @@ export function useChatRuntime({
               }
 
               // Check if this is an ask_user tool that completed with awaiting_user_input
+              // Note: result may be a string (JSON) due to backend truncation, so we need to parse it
+              let parsedResult = invocation.result;
+              if (typeof parsedResult === "string") {
+                try {
+                  parsedResult = JSON.parse(parsedResult);
+                } catch {
+                  // Not JSON, keep as string
+                }
+              }
               if (
                 invocation.toolName === "ask_user" &&
                 invocation.state === "result" &&
-                invocation.result !== null &&
-                typeof invocation.result === "object" &&
-                "status" in invocation.result &&
-                (invocation.result as { status: string }).status === "awaiting_user_input"
+                parsedResult !== null &&
+                typeof parsedResult === "object" &&
+                "status" in parsedResult &&
+                (parsedResult as { status: string }).status === "awaiting_user_input"
               ) {
                 // Get current state to capture assistant's message
                 const currentState = store.getState();
+                // Extract args from the parsed result (it contains question, type, options, etc.)
+                const askUserArgs = parsedResult as unknown as AskUserArgs;
                 pendingAskUserData = {
                   toolCallId: invocation.toolCallId,
-                  args: invocation.args as unknown as AskUserArgs,
+                  args: askUserArgs,
                   userMessageContent,
                   assistantContent: currentState.content,
                   assistantToolInvocations: currentState.toolInvocations,
@@ -279,10 +290,13 @@ export function useChatRuntime({
                   // Snapshot the chat history so we can continue from it
                   chatHistorySnapshot: chatHistory,
                 };
+                console.log("[useChatRuntime] Setting pendingAskUser:", pendingAskUserData);
                 store.setState({ pendingAskUser: pendingAskUserData });
               }
             }
-          }
+          },
+          true,  // enableTools
+          threadId ?? undefined  // Pass threadId for agent context
         );
 
         // Only save if still on the same thread
@@ -290,9 +304,6 @@ export function useChatRuntime({
         if (activeThreadIdRef.current !== requestThreadId || abortRef.current) {
           return;
         }
-
-        // Debug: log result
-        console.log("[useChatRuntime] Stream complete, result.text:", result.text, "accumulated:", accumulated, "toolInvocations:", result.toolInvocations);
 
         // Now save both messages to DB after streaming is complete
         // Keep content visible until messages are saved to avoid flash of empty content
@@ -361,12 +372,16 @@ export function useChatRuntime({
   // Continue conversation after ask_user response (uses snapshot to avoid race conditions)
   const continueFromAskUser = useCallback(
     async (pending: PendingAskUser, response: unknown) => {
-      if (threadId === null) return;
+      console.log("[continueFromAskUser] Called with response:", response, "threadId:", threadId);
+      if (threadId === null) {
+        console.log("[continueFromAskUser] threadId is null, returning early");
+        return;
+      }
 
       const requestThreadId = threadId;
 
       // Check for API key
-      const apiKey = getApiKey();
+      const apiKey = await getApiKey();
       if (apiKey === null || apiKey === "") {
         await saveMessage({
           role: "assistant",
@@ -377,11 +392,13 @@ export function useChatRuntime({
       }
 
       // Set running state
+      console.log("[continueFromAskUser] Setting running state");
       store.setState({ isRunning: true, isStreaming: true, content: "", toolInvocations: [] });
       abortRef.current = false;
 
       try {
         // Build the full chat history from the snapshot
+        console.log("[continueFromAskUser] Building chat history, snapshot length:", pending.chatHistorySnapshot.length);
         // The snapshot already contains: previous messages + user message
         // We need to add: assistant message with tool call + tool result
         const chatHistory: ChatMessage[] = [
@@ -426,18 +443,28 @@ export function useChatRuntime({
               }
 
               // Check for another ask_user
+              // Note: result may be a string (JSON) due to backend truncation, so we need to parse it
+              let chainedParsedResult = invocation.result;
+              if (typeof chainedParsedResult === "string") {
+                try {
+                  chainedParsedResult = JSON.parse(chainedParsedResult);
+                } catch {
+                  // Not JSON, keep as string
+                }
+              }
               if (
                 invocation.toolName === "ask_user" &&
                 invocation.state === "result" &&
-                invocation.result !== null &&
-                typeof invocation.result === "object" &&
-                "status" in invocation.result &&
-                (invocation.result as { status: string }).status === "awaiting_user_input"
+                chainedParsedResult !== null &&
+                typeof chainedParsedResult === "object" &&
+                "status" in chainedParsedResult &&
+                (chainedParsedResult as { status: string }).status === "awaiting_user_input"
               ) {
                 const currentState = store.getState();
+                const chainedAskUserArgs = chainedParsedResult as unknown as AskUserArgs;
                 newPendingAskUser = {
                   toolCallId: invocation.toolCallId,
-                  args: invocation.args as unknown as AskUserArgs,
+                  args: chainedAskUserArgs,
                   userMessageContent: "", // No new user message for chained ask_user
                   assistantContent: currentState.content,
                   assistantToolInvocations: currentState.toolInvocations,
@@ -447,11 +474,16 @@ export function useChatRuntime({
                 store.setState({ pendingAskUser: newPendingAskUser });
               }
             }
-          }
+          },
+          true,  // enableTools
+          threadId ?? undefined  // Pass threadId for agent context
         );
+
+        console.log("[continueFromAskUser] Stream complete, result.text length:", result.text.length);
 
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- refs can be mutated asynchronously
         if (activeThreadIdRef.current !== requestThreadId || abortRef.current) {
+          console.log("[continueFromAskUser] Thread changed or aborted, returning early");
           return;
         }
 
@@ -474,6 +506,7 @@ export function useChatRuntime({
         await saveMessage(assistantMessage);
         await refresh();
       } catch (error) {
+        console.error("[continueFromAskUser] Error:", error);
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- refs can be mutated asynchronously
         if (activeThreadIdRef.current === requestThreadId && !abortRef.current) {
           store.setState({ isStreaming: false, content: "", toolInvocations: [] });
@@ -551,10 +584,7 @@ export function useChatRuntime({
 
   const handleAskUserCancel = useCallback(async () => {
     const pending = store.getState().pendingAskUser;
-    if (pending === null) {
-      store.setState({ pendingAskUser: null });
-      return;
-    }
+    if (pending === null) return;
 
     store.setState({ pendingAskUser: null });
 
@@ -684,6 +714,7 @@ export function useChatRuntime({
       store.setState({ isStreaming: true });
 
       let accumulated = "";
+      let pendingAskUserData: PendingAskUser | null = null;
       const result = await streamChatResponse(
         chatHistory,
         (chunk) => {
@@ -705,8 +736,44 @@ export function useChatRuntime({
             } else {
               store.setState({ toolInvocations: [...currentInvocations, invocation] });
             }
+
+            // Check if this is an ask_user tool that completed with awaiting_user_input
+            // Note: result may be a string (JSON) due to backend truncation, so we need to parse it
+            let parsedResult = invocation.result;
+            if (typeof parsedResult === "string") {
+              try {
+                parsedResult = JSON.parse(parsedResult);
+              } catch {
+                // Not JSON, keep as string
+              }
+            }
+            if (
+              invocation.toolName === "ask_user" &&
+              invocation.state === "result" &&
+              parsedResult !== null &&
+              typeof parsedResult === "object" &&
+              "status" in parsedResult &&
+              (parsedResult as { status: string }).status === "awaiting_user_input"
+            ) {
+              // Get current state to capture assistant's message
+              const currentState = store.getState();
+              const askUserArgs = parsedResult as unknown as AskUserArgs;
+              pendingAskUserData = {
+                toolCallId: invocation.toolCallId,
+                args: askUserArgs,
+                userMessageContent: "", // No new user message for regenerate
+                assistantContent: currentState.content,
+                assistantToolInvocations: currentState.toolInvocations,
+                isFirstMessage: false,
+                // Snapshot the chat history so we can continue from it
+                chatHistorySnapshot: chatHistory,
+              };
+              store.setState({ pendingAskUser: pendingAskUserData });
+            }
           }
-        }
+        },
+        true,  // enableTools
+        threadId ?? undefined  // Pass threadId for agent context
       );
 
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- refs can be mutated asynchronously
@@ -715,6 +782,12 @@ export function useChatRuntime({
       }
 
       store.setState({ isStreaming: false });
+
+      // DON'T save if ask_user is pending - we'll save when user responds
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- pendingAskUserData is mutated in callback
+      if (pendingAskUserData !== null) {
+        return;
+      }
 
       // Save the new assistant response
       const assistantMessage: { role: "assistant"; content: string; toolInvocations?: ToolInvocation[] } = {

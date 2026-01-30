@@ -1,12 +1,14 @@
 import { useCallback, useState, useEffect } from "react";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Sparkles } from "lucide-react";
 import { Sidebar } from "./Sidebar";
 import { SettingsModal } from "./SettingsModal";
 import { ConversationSwitcher } from "./ConversationSwitcher";
 import { CommandPalette } from "./CommandPalette";
 import { ThemeSelector } from "./ThemeSelector";
 import { ChatThread } from "@app/components/chat/ChatThread";
+import { AgentTaskPanel } from "@app/components/agent/AgentTaskPanel";
 import { useThreads } from "@app/hooks/useThreads";
+import { useAgentSession } from "@app/hooks/useAgentSession";
 
 export function MainLayout() {
   const {
@@ -24,6 +26,19 @@ export function MainLayout() {
   const [isSwitcherOpen, setIsSwitcherOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isThemeSelectorOpen, setIsThemeSelectorOpen] = useState(false);
+  const [isTaskPanelVisible, setIsTaskPanelVisible] = useState(true);
+
+  // Get agent session for the active thread
+  const { session: agentSession } = useAgentSession(activeThreadId);
+
+  // Show task panel when there's an active session and panel is visible
+  const hasActiveSession = agentSession !== null;
+  const showTaskPanel = hasActiveSession && isTaskPanelVisible;
+
+  // Re-show panel when session becomes active
+  const handleShowTaskPanel = useCallback(() => {
+    setIsTaskPanelVisible(true);
+  }, []);
 
   const handleNewChat = useCallback(async () => {
     const thread = await createThread();
@@ -163,7 +178,8 @@ export function MainLayout() {
         onMouseLeave={handleSidebarMouseLeave}
         onOpenSettings={() => { setIsSettingsOpen(true); }}
       />
-      <main className="flex flex-1 flex-col overflow-hidden">
+      <main className="flex flex-1 overflow-hidden">
+        <div className="flex flex-1 flex-col overflow-hidden">
           <ChatThread
             threadId={activeThreadId}
             onTitleGenerated={handleTitleGenerated}
@@ -173,6 +189,29 @@ export function MainLayout() {
             initialMessage={pendingMessage}
             onInitialMessageConsumed={handleMessageConsumed}
           />
+        </div>
+        {showTaskPanel && (
+          <AgentTaskPanel
+            threadId={activeThreadId}
+            onClose={() => { setIsTaskPanelVisible(false); }}
+          />
+        )}
+        {/* Button to reopen task panel when hidden but session exists */}
+        {hasActiveSession && !isTaskPanelVisible && (
+          <button
+            type="button"
+            onClick={handleShowTaskPanel}
+            className="absolute right-4 top-4 z-10 flex items-center gap-2 rounded-lg px-3 py-2 shadow-lg transition-colors"
+            style={{
+              background: "var(--bg-secondary)",
+              border: "1px solid var(--border-secondary)",
+              color: "var(--fg-accent)",
+            }}
+          >
+            <Sparkles className="h-4 w-4" />
+            <span className="text-sm font-medium">Agent Tasks</span>
+          </button>
+        )}
       </main>
 
       <SettingsModal

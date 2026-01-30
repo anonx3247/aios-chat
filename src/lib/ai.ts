@@ -3,8 +3,17 @@
  *
  * The Node backend handles AI SDK streaming and MCP server connections.
  * This keeps the frontend simple and avoids bundling Node.js-only code.
+ *
+ * Sensitive credentials (API keys) are stored in OS-native secure storage.
+ * Non-sensitive settings (provider, model names, URLs) are in localStorage.
  */
 import type { ToolInvocation } from "@app/types/message";
+import {
+  getCredentialWithFallback,
+  setCredentialWithFallback,
+  getAllCredentialsWithFallback,
+  type CredentialKey,
+} from "./credentials";
 
 // Re-export ToolInvocation type
 export type { ToolInvocation };
@@ -24,50 +33,35 @@ export interface ProviderConfig {
   enableTools: boolean;
 }
 
+export interface EmailConfig {
+  emailAddress: string | undefined;
+  emailUsername: string | undefined;
+  emailPassword: string | undefined;
+  emailImapHost: string | undefined;
+  emailImapPort: string | undefined;
+  emailImapSecurity: string | undefined;
+  emailSmtpHost: string | undefined;
+  emailSmtpPort: string | undefined;
+  emailSmtpSecurity: string | undefined;
+  emailSslVerify: string | undefined;
+}
+
 const DEFAULT_OLLAMA_URL = "http://localhost:11434";
 const DEFAULT_OLLAMA_MODEL = "qwen3-vl:latest";
 
-// Provider configuration
-export function getProviderConfig(): ProviderConfig {
-  const provider = (localStorage.getItem("ai_provider") as AIProvider) ?? "ollama";
-  return {
-    provider,
-    anthropicApiKey: localStorage.getItem("anthropic_api_key") ?? undefined,
-    perplexityApiKey: localStorage.getItem("perplexity_api_key") ?? undefined,
-    ollamaBaseUrl: localStorage.getItem("ollama_base_url") ?? DEFAULT_OLLAMA_URL,
-    ollamaModel: localStorage.getItem("ollama_model") ?? DEFAULT_OLLAMA_MODEL,
-    // Default: tools enabled for Anthropic, disabled for Ollama (not all models support it)
-    enableTools: localStorage.getItem("enable_tools") === "true" || (localStorage.getItem("enable_tools") === null && provider === "anthropic"),
-  };
-}
+// ============================================================================
+// Non-sensitive settings (localStorage)
+// ============================================================================
 
 export function setProvider(provider: AIProvider): void {
   localStorage.setItem("ai_provider", provider);
 }
 
 export function getProvider(): AIProvider {
-  return (localStorage.getItem("ai_provider") as AIProvider) ?? "ollama";
+  const stored = localStorage.getItem("ai_provider");
+  return stored !== null ? (stored as AIProvider) : "ollama";
 }
 
-// API key storage - Anthropic
-export function setApiKey(key: string): void {
-  localStorage.setItem("anthropic_api_key", key);
-}
-
-export function getApiKey(): string | null {
-  return localStorage.getItem("anthropic_api_key");
-}
-
-// API key storage - Perplexity
-export function setPerplexityApiKey(key: string): void {
-  localStorage.setItem("perplexity_api_key", key);
-}
-
-export function getPerplexityApiKey(): string | null {
-  return localStorage.getItem("perplexity_api_key");
-}
-
-// Ollama configuration
 export function setOllamaBaseUrl(url: string): void {
   localStorage.setItem("ollama_base_url", url);
 }
@@ -84,7 +78,6 @@ export function getOllamaModel(): string {
   return localStorage.getItem("ollama_model") ?? DEFAULT_OLLAMA_MODEL;
 }
 
-// Tools configuration
 export function setEnableTools(enabled: boolean): void {
   localStorage.setItem("enable_tools", enabled ? "true" : "false");
 }
@@ -96,6 +89,109 @@ export function getEnableTools(): boolean {
     return getProvider() === "anthropic";
   }
   return stored === "true";
+}
+
+// ============================================================================
+// Sensitive credentials (secure storage)
+// ============================================================================
+
+// API key storage - Anthropic
+export async function setApiKey(key: string): Promise<void> {
+  await setCredentialWithFallback("anthropic_api_key", key);
+}
+
+export async function getApiKey(): Promise<string | null> {
+  return getCredentialWithFallback("anthropic_api_key");
+}
+
+// API key storage - Perplexity
+export async function setPerplexityApiKey(key: string): Promise<void> {
+  await setCredentialWithFallback("perplexity_api_key", key);
+}
+
+export async function getPerplexityApiKey(): Promise<string | null> {
+  return getCredentialWithFallback("perplexity_api_key");
+}
+
+// Email credentials
+export async function setEmailCredential(
+  key: Extract<CredentialKey, `email_${string}`>,
+  value: string
+): Promise<void> {
+  await setCredentialWithFallback(key, value);
+}
+
+export async function getEmailCredential(
+  key: Extract<CredentialKey, `email_${string}`>
+): Promise<string | null> {
+  return getCredentialWithFallback(key);
+}
+
+// ============================================================================
+// Provider configuration (combines localStorage + secure storage)
+// ============================================================================
+
+/**
+ * Get provider configuration - async because it reads from secure storage
+ */
+export async function getProviderConfigAsync(): Promise<ProviderConfig> {
+  const provider = getProvider();
+  const [anthropicApiKey, perplexityApiKey] = await Promise.all([
+    getApiKey(),
+    getPerplexityApiKey(),
+  ]);
+
+  return {
+    provider,
+    anthropicApiKey: anthropicApiKey ?? undefined,
+    perplexityApiKey: perplexityApiKey ?? undefined,
+    ollamaBaseUrl: getOllamaBaseUrl(),
+    ollamaModel: getOllamaModel(),
+    // Default: tools enabled for Anthropic, disabled for Ollama (not all models support it)
+    enableTools:
+      localStorage.getItem("enable_tools") === "true" ||
+      (localStorage.getItem("enable_tools") === null && provider === "anthropic"),
+  };
+}
+
+/**
+ * Get email configuration from secure storage
+ */
+export async function getEmailConfigAsync(): Promise<EmailConfig> {
+  const credentials = await getAllCredentialsWithFallback();
+  return {
+    emailAddress: credentials.email_address ?? undefined,
+    emailUsername: credentials.email_username ?? undefined,
+    emailPassword: credentials.email_password ?? undefined,
+    emailImapHost: credentials.email_imap_host ?? undefined,
+    emailImapPort: credentials.email_imap_port ?? undefined,
+    emailImapSecurity: credentials.email_imap_security ?? undefined,
+    emailSmtpHost: credentials.email_smtp_host ?? undefined,
+    emailSmtpPort: credentials.email_smtp_port ?? undefined,
+    emailSmtpSecurity: credentials.email_smtp_security ?? undefined,
+    emailSslVerify: credentials.email_ssl_verify ?? undefined,
+  };
+}
+
+/**
+ * Synchronous provider config - DEPRECATED, use getProviderConfigAsync
+ * Only returns non-sensitive settings; API keys will be undefined
+ */
+export function getProviderConfig(): Omit<ProviderConfig, "anthropicApiKey" | "perplexityApiKey"> & {
+  anthropicApiKey: undefined;
+  perplexityApiKey: undefined;
+} {
+  const provider = getProvider();
+  return {
+    provider,
+    anthropicApiKey: undefined,
+    perplexityApiKey: undefined,
+    ollamaBaseUrl: getOllamaBaseUrl(),
+    ollamaModel: getOllamaModel(),
+    enableTools:
+      localStorage.getItem("enable_tools") === "true" ||
+      (localStorage.getItem("enable_tools") === null && provider === "anthropic"),
+  };
 }
 
 export interface ToolResult {
@@ -189,12 +285,14 @@ export async function streamChatResponse(
   messages: ChatMessage[],
   onChunk: (text: string) => void,
   onToolInvocation?: (invocation: ToolInvocation) => void,
-  enableTools = true
+  enableTools = true,
+  threadId?: string
 ): Promise<StreamResult> {
-  const config = getProviderConfig();
+  const config = await getProviderConfigAsync();
+  const emailConfig = await getEmailConfigAsync();
 
   // Validate config based on provider
-  if (config.provider === "anthropic" && !config.anthropicApiKey) {
+  if (config.provider === "anthropic" && (config.anthropicApiKey === undefined || config.anthropicApiKey === "")) {
     throw new Error("Anthropic API key not set. Please add it in settings.");
   }
 
@@ -222,12 +320,28 @@ export async function streamChatResponse(
     },
     body: JSON.stringify({
       messages: formattedMessages,
+      threadId, // Pass threadId for agent context
       provider: config.provider,
       apiKey: config.anthropicApiKey,
       perplexityApiKey: config.perplexityApiKey,
       ollamaBaseUrl: config.ollamaBaseUrl,
       model: config.provider === "ollama" ? config.ollamaModel : undefined,
       enableTools: enableTools && config.enableTools,
+      // Pass email credentials if configured
+      emailConfig: emailConfig.emailAddress !== undefined && emailConfig.emailAddress !== ""
+        ? {
+            address: emailConfig.emailAddress,
+            username: emailConfig.emailUsername,
+            password: emailConfig.emailPassword,
+            imapHost: emailConfig.emailImapHost,
+            imapPort: emailConfig.emailImapPort,
+            imapSecurity: emailConfig.emailImapSecurity,
+            smtpHost: emailConfig.emailSmtpHost,
+            smtpPort: emailConfig.emailSmtpPort,
+            smtpSecurity: emailConfig.emailSmtpSecurity,
+            sslVerify: emailConfig.emailSslVerify,
+          }
+        : undefined,
     }),
   });
 
@@ -331,9 +445,9 @@ export async function generateConversationTitle(
   userMessage: string,
   assistantResponse: string
 ): Promise<string> {
-  const config = getProviderConfig();
+  const config = await getProviderConfigAsync();
 
-  if (config.provider === "anthropic" && !config.anthropicApiKey) {
+  if (config.provider === "anthropic" && (config.anthropicApiKey === undefined || config.anthropicApiKey === "")) {
     throw new Error("Anthropic API key not set");
   }
 
@@ -356,6 +470,31 @@ export async function generateConversationTitle(
     throw new Error("Failed to generate title");
   }
 
-  const data = await response.json() as { title: string };
+  const data = (await response.json()) as { title: string };
   return data.title;
+}
+
+/**
+ * Test email connection via the Node backend
+ */
+export async function testEmailConnection(emailConfig: EmailConfig): Promise<{ success: boolean; error?: string }> {
+  const response = await fetch(`${NODE_BACKEND_URL}/api/email/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      emailConfig: {
+        address: emailConfig.emailAddress,
+        username: emailConfig.emailUsername,
+        password: emailConfig.emailPassword,
+        imapHost: emailConfig.emailImapHost,
+        imapPort: emailConfig.emailImapPort,
+        imapSecurity: emailConfig.emailImapSecurity,
+        smtpHost: emailConfig.emailSmtpHost,
+        smtpPort: emailConfig.emailSmtpPort,
+        smtpSecurity: emailConfig.emailSmtpSecurity,
+        sslVerify: emailConfig.emailSslVerify,
+      },
+    }),
+  });
+  return (await response.json()) as { success: boolean; error?: string };
 }

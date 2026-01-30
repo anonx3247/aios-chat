@@ -1,4 +1,5 @@
 mod commands;
+mod credentials;
 mod db;
 
 use std::fs;
@@ -70,6 +71,10 @@ pub fn run() {
             commands::messages::save_message,
             commands::messages::get_messages,
             commands::messages::delete_message,
+            credentials::get_credential,
+            credentials::set_credential,
+            credentials::delete_credential,
+            credentials::get_all_credentials,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
