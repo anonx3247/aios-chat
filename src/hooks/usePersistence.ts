@@ -8,6 +8,7 @@ interface UsePersistenceResult {
   error: string | null;
   saveMessage: (message: NewMessage) => Promise<Message>;
   deleteMessage: (messageId: string) => Promise<void>;
+  deleteMessagesFrom: (messageId: string) => Promise<void>;
   refresh: () => Promise<void>;
 }
 
@@ -58,12 +59,26 @@ export function usePersistence(threadId: string | null): UsePersistenceResult {
     []
   );
 
+  const deleteMessagesFrom = useCallback(
+    async (messageId: string) => {
+      await tauri.deleteMessagesFrom(messageId);
+      // Remove from local state: find message index, remove it and everything after
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.id === messageId);
+        if (idx < 0) return prev;
+        return prev.slice(0, idx);
+      });
+    },
+    []
+  );
+
   return {
     messages,
     isLoading,
     error,
     saveMessage,
     deleteMessage,
+    deleteMessagesFrom,
     refresh,
   };
 }

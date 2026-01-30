@@ -85,6 +85,22 @@ pub fn delete_message(conn: &Connection, message_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Delete a message and all messages after it in the same thread (by created_at)
+pub fn delete_messages_from(conn: &Connection, message_id: &str) -> Result<()> {
+    // Get the message's thread_id and created_at
+    let (thread_id, created_at): (String, String) = conn.query_row(
+        "SELECT thread_id, created_at FROM messages WHERE id = ?1",
+        params![message_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    conn.execute(
+        "DELETE FROM messages WHERE thread_id = ?1 AND created_at >= ?2",
+        params![thread_id, created_at],
+    )?;
+    Ok(())
+}
+
 #[allow(dead_code)]
 pub fn delete_messages_by_thread(conn: &Connection, thread_id: &str) -> Result<()> {
     conn.execute(

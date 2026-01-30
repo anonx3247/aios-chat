@@ -14,6 +14,9 @@ import { ExploreDisplay } from "./tools/ExploreDisplay";
 import { ExecuteDisplay } from "./tools/ExecuteDisplay";
 import { GenericToolDisplay } from "./tools/GenericToolDisplay";
 import { ConfigureSettingsDisplay } from "./tools/ConfigureSettingsDisplay";
+import { ShowContentDisplay } from "./tools/ShowContentDisplay";
+import { ShowDocumentDisplay } from "./tools/ShowDocumentDisplay";
+import { UpdatePersonalityDisplay } from "./tools/UpdatePersonalityDisplay";
 
 interface ToolDisplayProps {
   toolInvocation: ToolInvocation;
@@ -37,6 +40,18 @@ export function ToolDisplay({ toolInvocation }: ToolDisplayProps) {
 
   if (toolName === "configure_settings") {
     return <ConfigureSettingsDisplay toolInvocation={toolInvocation} />;
+  }
+
+  if (toolName === "show_content") {
+    return <ShowContentDisplay toolInvocation={toolInvocation} />;
+  }
+
+  if (toolName === "show_document") {
+    return <ShowDocumentDisplay toolInvocation={toolInvocation} />;
+  }
+
+  if (toolName === "update_personality") {
+    return <UpdatePersonalityDisplay toolInvocation={toolInvocation} />;
   }
 
   // MCP tool displays

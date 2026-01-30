@@ -7,4 +7,7 @@ export { FetchDisplay } from "./FetchDisplay";
 export { FilesystemDisplay } from "./FilesystemDisplay";
 export { GenericToolDisplay } from "./GenericToolDisplay";
 export { PerplexityDisplay } from "./PerplexityDisplay";
+export { ShowContentDisplay } from "./ShowContentDisplay";
+export { ShowDocumentDisplay } from "./ShowDocumentDisplay";
 export { TimeDisplay } from "./TimeDisplay";
+export { UpdatePersonalityDisplay } from "./UpdatePersonalityDisplay";

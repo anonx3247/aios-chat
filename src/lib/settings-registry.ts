@@ -41,6 +41,10 @@ export const SETTINGS_PAGES: Record<string, SettingsPage> = {
     label: "Firecrawl API Key",
     parentId: "settings.keys",
   },
+  "settings.personality": {
+    id: "settings.personality",
+    label: "Personality",
+  },
   "settings.email": {
     id: "settings.email",
     label: "Email",
@@ -63,7 +67,7 @@ export const SETTINGS_PAGES: Record<string, SettingsPage> = {
 };
 
 /** Top-level pages shown in the nav sidebar */
-export const TOP_LEVEL_PAGES = ["settings.provider", "settings.keys", "settings.email"] as const;
+export const TOP_LEVEL_PAGES = ["settings.provider", "settings.keys", "settings.personality", "settings.email"] as const;
 
 /**
  * Resolve a hierarchical key to a page and optional sub-filter.

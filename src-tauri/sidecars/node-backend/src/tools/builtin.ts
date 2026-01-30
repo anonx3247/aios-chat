@@ -405,6 +405,47 @@ Progress will be shown in the task panel while work is ongoing.`,
   },
 });
 
+// =============================================================================
+// Sidebar Content Tools
+// =============================================================================
+
+export const showContentTool = tool({
+  description: `Display rich content in the sidebar viewer. Use for reports, analysis, detailed results, code reviews, or any content too long for chat. Supports markdown and LaTeX (KaTeX via $...$ and $$...$$).`,
+  parameters: z.object({
+    title: z.string().describe("Document title shown in the panel header"),
+    content: z.string().describe("Markdown content (supports LaTeX via $...$ and $$...$$)"),
+  }),
+  execute: async ({ title, content }) => {
+    return { title, content, display: "sidebar_content" };
+  },
+});
+
+export const showDocumentTool = tool({
+  description: `Open a file or webpage in the sidebar viewer. Supports: markdown files, code files (syntax highlighted), PDFs, and web URLs (rendered in webview).`,
+  parameters: z.object({
+    uri: z.string().describe("URI to display: file:///path/to/file or https://example.com"),
+    title: z.string().optional().describe("Optional title override for the panel header"),
+  }),
+  execute: async ({ uri, title }) => {
+    return { uri, title, display: "sidebar_document" };
+  },
+});
+
+// =============================================================================
+// Personality Tool
+// =============================================================================
+
+export const updatePersonalityTool = tool({
+  description: `Suggest a change to your personality/behavior prompt. The user will see the proposed change and can accept or reject it.`,
+  parameters: z.object({
+    suggestion: z.string().describe("The proposed personality text or modification"),
+    reason: z.string().describe("Why this change would be helpful"),
+  }),
+  execute: async ({ suggestion, reason }) => {
+    return { suggestion, reason, awaiting_user_input: true, type: "personality_update" };
+  },
+});
+
 /**
  * Get all built-in tools as a record
  */
@@ -414,5 +455,8 @@ export function getBuiltinTools(): Record<string, CoreTool> {
     embed: embedTool,
     configure_settings: configureSettingsTool,
     complex: complexTool,
+    show_content: showContentTool,
+    show_document: showDocumentTool,
+    update_personality: updatePersonalityTool,
   };
 }

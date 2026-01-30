@@ -5,6 +5,7 @@
  */
 import { ExternalLink, Play, Music, MapPin, MessageCircle, Loader2 } from "lucide-react";
 import type { ToolInvocation } from "@app/types/message";
+import { parseToolResult } from "./parseToolResult";
 
 interface EmbedDisplayProps {
   toolInvocation: ToolInvocation;
@@ -38,7 +39,7 @@ export function EmbedDisplay({ toolInvocation }: EmbedDisplayProps) {
     );
   }
 
-  const embedResult = result as EmbedResult | undefined;
+  const embedResult = parseToolResult<EmbedResult>(result);
   if (embedResult === undefined) {
     return null;
   }

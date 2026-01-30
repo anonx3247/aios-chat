@@ -35,3 +35,7 @@ export async function getMessages(threadId: string): Promise<Message[]> {
 export async function deleteMessage(messageId: string): Promise<void> {
   await invoke("delete_message", { messageId });
 }
+
+export async function deleteMessagesFrom(messageId: string): Promise<void> {
+  await invoke("delete_messages_from", { messageId });
+}

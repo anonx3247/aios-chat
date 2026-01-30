@@ -7,6 +7,7 @@ import { useState } from "react";
 import { Cog, ChevronDown, ChevronRight, Loader2, CheckCircle2, XCircle } from "lucide-react";
 import type { ToolInvocation } from "@app/types/message";
 import { Markdown } from "../Markdown";
+import { parseToolResult } from "./parseToolResult";
 
 interface ExecuteDisplayProps {
   toolInvocation: ToolInvocation;
@@ -135,7 +136,7 @@ function SubExecutorCard({
 export function ExecuteDisplay({ toolInvocation }: ExecuteDisplayProps) {
   const { state, args, result } = toolInvocation;
   const executeArgs = args as unknown as ExecuteArgs;
-  const executeResult = result as ExecuteResult | undefined;
+  const executeResult = parseToolResult<ExecuteResult>(result);
 
   const assignments = Array.isArray(executeArgs.assignments) ? executeArgs.assignments : [];
   const results = executeResult?.results ?? [];

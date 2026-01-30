@@ -82,8 +82,7 @@ function createStreamingStore() {
   };
 }
 
-// Max iterations for frontend-driven tool loop
-const MAX_STREAM_ITERATIONS = 10;
+// No hard limit on tool loop iterations — user can stop via cancel button
 
 /**
  * Check if an invocation is an ask_user tool awaiting user input.
@@ -116,7 +115,7 @@ export function useChatRuntime({
   initialMessage,
   onInitialMessageConsumed,
 }: UseChatRuntimeOptions) {
-  const { messages, saveMessage, deleteMessage, refresh } = usePersistence(threadId);
+  const { messages, saveMessage, deleteMessage, deleteMessagesFrom, refresh } = usePersistence(threadId);
   const abortRef = useRef<boolean>(false);
   const activeThreadIdRef = useRef<string | null>(null);
 
@@ -173,9 +172,14 @@ export function useChatRuntime({
       let allText = "";
       let allToolInvocations: ToolInvocation[] = [];
 
-      for (let iteration = 0; iteration < MAX_STREAM_ITERATIONS; iteration++) {
-        // Check abort / thread switch
-        if (abortRef.current || activeThreadIdRef.current !== requestThreadId) return null;
+      for (let iteration = 0; ; iteration++) {
+        // Check abort / thread switch — return partial results instead of null
+        if (abortRef.current || activeThreadIdRef.current !== requestThreadId) {
+          if (allText.length > 0 || allToolInvocations.length > 0) {
+            return { text: allText, toolInvocations: allToolInvocations, hasToolCalls: false, aborted: true };
+          }
+          return null;
+        }
 
         // Reset per-iteration streaming UI (keep accumulated content from prior iterations)
         if (iteration > 0) {
@@ -265,7 +269,12 @@ export function useChatRuntime({
         lastResult = result;
 
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- ref can be mutated asynchronously
-        if (abortRef.current || activeThreadIdRef.current !== requestThreadId) return null;
+        if (abortRef.current || activeThreadIdRef.current !== requestThreadId) {
+          if (allText.length > 0 || allToolInvocations.length > 0) {
+            return { text: allText, toolInvocations: allToolInvocations, hasToolCalls: false, aborted: true };
+          }
+          return null;
+        }
 
         // If ask_user is pending, stop the loop
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- pendingAskUserData is mutated in callback
@@ -299,7 +308,8 @@ export function useChatRuntime({
         console.log(`[runStreamLoop] Iteration ${String(iteration + 1)} complete, looping for tool continuation`);
       }
 
-      // Return combined result
+      // Return combined result — lastResult is always set after at least one iteration
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- loop may break before assignment on abort
       if (lastResult !== null) {
         return {
           text: allText,
@@ -369,13 +379,13 @@ export function useChatRuntime({
 
         const result = await runStreamLoop(chatHistory, requestThreadId, textContent, isFirstMessage);
 
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- ref can be mutated asynchronously
-        if (activeThreadIdRef.current !== requestThreadId || abortRef.current) return;
-
         store.setState({ isStreaming: false });
 
-        // If runStreamLoop returned null, ask_user is pending or aborted — don't save
+        // If runStreamLoop returned null, ask_user is pending or truly empty — don't save
         if (result === null) return;
+
+        // If aborted but has partial content, still save it
+        const wasAborted = activeThreadIdRef.current !== requestThreadId || abortRef.current;
 
         // Clear streaming UI before saving/refreshing to prevent duplicate display
         store.setState({ content: "", contentParts: [], toolInvocations: [], pendingUserMessage: null });
@@ -390,8 +400,8 @@ export function useChatRuntime({
         }
         await saveMessage(assistantMessage);
 
-        // Generate title after first exchange
-        if (isFirstMessage && onTitleGenerated !== undefined) {
+        // Generate title after first exchange (skip if aborted)
+        if (isFirstMessage && onTitleGenerated !== undefined && !wasAborted) {
           try {
             const title = await generateConversationTitle(textContent, result.text);
             onTitleGenerated(title);
@@ -461,12 +471,9 @@ export function useChatRuntime({
 
         const result = await runStreamLoop(chatHistory, requestThreadId, "", false);
 
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- ref can be mutated asynchronously
-        if (activeThreadIdRef.current !== requestThreadId || abortRef.current) return;
-
         store.setState({ isStreaming: false });
 
-        if (result === null) return; // ask_user pending or aborted
+        if (result === null) return; // ask_user pending or truly empty
 
         // Clear streaming UI before saving/refreshing to prevent duplicate display
         store.setState({ content: "", contentParts: [], toolInvocations: [] });
@@ -620,9 +627,6 @@ export function useChatRuntime({
 
       const result = await runStreamLoop(chatHistory, requestThreadId, "", false);
 
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- ref can be mutated asynchronously
-      if (activeThreadIdRef.current !== requestThreadId || abortRef.current) return;
-
       store.setState({ isStreaming: false });
 
       if (result === null) return;
@@ -653,6 +657,171 @@ export function useChatRuntime({
       }
     }
   }, [threadId, messages, deleteMessage, refresh, saveMessage, store, streamingState.isRunning, runStreamLoop]);
+
+  // =========================================================================
+  // regenerateMessage — delete this assistant message + everything after → re-run
+  // =========================================================================
+  const regenerateMessage = useCallback(async (messageId: string) => {
+    if (threadId === null || streamingState.isRunning) return;
+
+    const msgIndex = messages.findIndex((m) => m.id === messageId);
+    if (msgIndex < 0) return;
+    const targetMsg = messages[msgIndex];
+    if (targetMsg?.role !== "assistant") return;
+
+    // Delete this message and everything after it
+    await deleteMessagesFrom(messageId);
+    await refresh();
+
+    // Build history from messages before this one
+    const historyMessages = messages.slice(0, msgIndex);
+
+    store.setState({
+      isRunning: true,
+      isStreaming: false,
+      content: "",
+      toolInvocations: [],
+      contentParts: [],
+      pendingUserMessage: null,
+    });
+    abortRef.current = false;
+
+    const requestThreadId = threadId;
+
+    try {
+      const chatHistory: ChatMessage[] = historyMessages.map((m) => {
+        const msg: ChatMessage = { role: m.role, content: m.content };
+        if (m.toolInvocations !== undefined && m.toolInvocations.length > 0) {
+          msg.toolInvocations = m.toolInvocations;
+        }
+        return msg;
+      });
+
+      store.setState({ isStreaming: true });
+
+      const result = await runStreamLoop(chatHistory, requestThreadId, "", false);
+
+      store.setState({ isStreaming: false });
+
+      if (result === null) return;
+
+      store.setState({ content: "", contentParts: [], toolInvocations: [] });
+
+      const assistantMessage: { role: "assistant"; content: string; toolInvocations?: ToolInvocation[] } = {
+        role: "assistant",
+        content: result.text,
+      };
+      if (result.toolInvocations.length > 0) {
+        assistantMessage.toolInvocations = result.toolInvocations;
+      }
+      await saveMessage(assistantMessage);
+      await refresh();
+    } catch (error) {
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- ref can be mutated asynchronously
+      if (activeThreadIdRef.current === requestThreadId && !abortRef.current) {
+        store.setState({ isStreaming: false, content: "", toolInvocations: [], contentParts: [] });
+        const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+        await saveMessage({ role: "assistant", content: `Error: ${errorMessage}` });
+        await refresh();
+      }
+    } finally {
+      if (activeThreadIdRef.current === requestThreadId) {
+        store.setState({ isRunning: false });
+      }
+    }
+  }, [threadId, messages, deleteMessagesFrom, refresh, saveMessage, store, streamingState.isRunning, runStreamLoop]);
+
+  // =========================================================================
+  // editUserMessage — delete from this user msg onward → send new content
+  // =========================================================================
+  const editUserMessage = useCallback(async (messageId: string, newContent: string) => {
+    if (threadId === null || streamingState.isRunning) return;
+    if (newContent.trim().length === 0) return;
+
+    const msgIndex = messages.findIndex((m) => m.id === messageId);
+    if (msgIndex < 0) return;
+    const targetMsg = messages[msgIndex];
+    if (targetMsg?.role !== "user") return;
+
+    // Delete this message and everything after it
+    await deleteMessagesFrom(messageId);
+    await refresh();
+
+    // Build history from messages before this one, then add the edited message
+    const historyMessages = messages.slice(0, msgIndex);
+
+    store.setState({
+      isRunning: true,
+      isStreaming: false,
+      content: "",
+      toolInvocations: [],
+      contentParts: [],
+      pendingUserMessage: newContent,
+    });
+    abortRef.current = false;
+
+    const requestThreadId = threadId;
+
+    try {
+      // Save the edited user message
+      await saveMessage({ role: "user", content: newContent });
+      await refresh();
+      store.setState({ pendingUserMessage: null });
+
+      const chatHistory: ChatMessage[] = historyMessages.map((m) => {
+        const msg: ChatMessage = { role: m.role, content: m.content };
+        if (m.toolInvocations !== undefined && m.toolInvocations.length > 0) {
+          msg.toolInvocations = m.toolInvocations;
+        }
+        return msg;
+      });
+      chatHistory.push({ role: "user", content: newContent });
+
+      store.setState({ isStreaming: true });
+
+      const result = await runStreamLoop(chatHistory, requestThreadId, newContent, false);
+
+      store.setState({ isStreaming: false });
+
+      if (result === null) return;
+
+      const wasAborted = activeThreadIdRef.current !== requestThreadId || abortRef.current;
+
+      store.setState({ content: "", contentParts: [], toolInvocations: [], pendingUserMessage: null });
+
+      const assistantMessage: { role: "assistant"; content: string; toolInvocations?: ToolInvocation[] } = {
+        role: "assistant",
+        content: result.text,
+      };
+      if (result.toolInvocations.length > 0) {
+        assistantMessage.toolInvocations = result.toolInvocations;
+      }
+      await saveMessage(assistantMessage);
+
+      if (onTitleGenerated !== undefined && !wasAborted && historyMessages.length === 0) {
+        try {
+          const title = await generateConversationTitle(newContent, result.text);
+          onTitleGenerated(title);
+        } catch {
+          onTitleGenerated(newContent.slice(0, 50));
+        }
+      }
+
+      await refresh();
+    } catch (error) {
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- ref can be mutated asynchronously
+      if (activeThreadIdRef.current === requestThreadId && !abortRef.current) {
+        store.setState({ isStreaming: false, content: "", toolInvocations: [], contentParts: [], pendingUserMessage: null });
+        const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+        await saveMessage({ role: "assistant", content: `Error: ${errorMessage}` });
+        await refresh();
+      }
+    } finally {
+      if (activeThreadIdRef.current === requestThreadId) {
+        store.setState({ isRunning: false });
+      }
+    }
+  }, [threadId, messages, deleteMessagesFrom, refresh, saveMessage, store, streamingState.isRunning, runStreamLoop, onTitleGenerated]);
 
   // =========================================================================
   // Wiring
@@ -707,5 +876,7 @@ export function useChatRuntime({
     handleAskUserSubmit,
     handleAskUserCancel,
     regenerateLastMessage,
+    regenerateMessage,
+    editUserMessage,
   };
 }

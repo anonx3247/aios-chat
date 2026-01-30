@@ -7,7 +7,7 @@ import {
   useThreadRuntime,
   useMessage,
 } from "@assistant-ui/react";
-import { ArrowUp, Sparkles, MessageCircle, RotateCcw, AlertTriangle } from "lucide-react";
+import { ArrowUp, Square, Sparkles, MessageCircle, RotateCcw, Pencil, Check, X, AlertTriangle } from "lucide-react";
 import type { Thread } from "@app/types/thread";
 import { useChatRuntime } from "@app/hooks/useChatRuntime";
 import { Markdown } from "./Markdown";
@@ -159,12 +159,14 @@ function WelcomeScreen({ onStartChatWithMessage, onSelectThread, recentThreads }
   );
 }
 
-// Context for pending ask_user question, regenerate, running state, and live streaming
+// Context for pending ask_user question, regenerate, edit, running state, and live streaming
 interface ChatContext {
   pendingAskUser: { toolCallId: string; args: AskUserQuestionArgs } | null;
   onAskUserSubmit: (response: unknown) => void | Promise<void>;
   onAskUserCancel: () => void | Promise<void>;
   onRegenerate: () => void | Promise<void>;
+  onRegenerateMessage: (messageId: string) => void | Promise<void>;
+  onEditUserMessage: (messageId: string, newContent: string) => void | Promise<void>;
   isRunning: boolean;
   streamingContentParts: StreamingContentPart[];
   streamingContent: string;
@@ -175,7 +177,7 @@ function useChatContext() {
 }
 
 export function ChatThread({ threadId, onTitleGenerated, onStartChatWithMessage, onSelectThread, recentThreads, initialMessage, onInitialMessageConsumed }: ChatThreadProps) {
-  const { runtime, isRunning, streamingContentParts, streamingContent, pendingAskUser, handleAskUserSubmit, handleAskUserCancel, regenerateLastMessage } = useChatRuntime({ threadId, onTitleGenerated, initialMessage, onInitialMessageConsumed });
+  const { runtime, isRunning, streamingContentParts, streamingContent, pendingAskUser, handleAskUserSubmit, handleAskUserCancel, regenerateLastMessage, regenerateMessage, editUserMessage } = useChatRuntime({ threadId, onTitleGenerated, initialMessage, onInitialMessageConsumed });
   const prevThreadIdRef = useRef<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -215,6 +217,8 @@ export function ChatThread({ threadId, onTitleGenerated, onStartChatWithMessage,
     onAskUserSubmit: handleAskUserSubmit,
     onAskUserCancel: handleAskUserCancel,
     onRegenerate: regenerateLastMessage,
+    onRegenerateMessage: regenerateMessage,
+    onEditUserMessage: editUserMessage,
     isRunning,
     streamingContentParts,
     streamingContent,
@@ -349,12 +353,24 @@ function ThreadContent({ scrollRef }: ThreadContentProps) {
               style={{ color: "var(--fg-primary)" }}
               autoFocus
             />
-            <ComposerPrimitive.Send
-              className="aui-composer-send m-2 flex h-9 w-9 items-center justify-center rounded-xl text-white transition-colors"
-              style={{ background: "var(--bg-accent)" }}
-            >
-              <ArrowUp className="h-4 w-4" />
-            </ComposerPrimitive.Send>
+            {chatContext?.isRunning === true ? (
+              <button
+                type="button"
+                onClick={() => { runtime.cancelRun(); }}
+                className="m-2 flex h-9 w-9 items-center justify-center rounded-xl transition-colors"
+                style={{ background: "var(--danger, #ef4444)", color: "white" }}
+                title="Stop generating"
+              >
+                <Square className="h-4 w-4" />
+              </button>
+            ) : (
+              <ComposerPrimitive.Send
+                className="aui-composer-send m-2 flex h-9 w-9 items-center justify-center rounded-xl text-white transition-colors"
+                style={{ background: "var(--bg-accent)" }}
+              >
+                <ArrowUp className="h-4 w-4" />
+              </ComposerPrimitive.Send>
+            )}
           </ComposerPrimitive.Root>
           <p className="mt-2 text-center text-xs" style={{ color: "var(--fg-muted)" }}>
             AI can make mistakes. Consider checking important information.
@@ -443,17 +459,106 @@ function ChatRunningIndicator() {
 }
 
 function UserMessage() {
+  const message = useMessage();
+  const chatContext = useChatContext();
+  const [isEditing, setIsEditing] = useState(false);
+  const [editText, setEditText] = useState("");
+
+  const messageId = message.id;
+  const textContent = message.content
+    .filter((p): p is { type: "text"; text: string } => p.type === "text")
+    .map((p) => p.text)
+    .join("\n");
+
+  const handleStartEdit = () => {
+    setEditText(textContent);
+    setIsEditing(true);
+  };
+
+  const handleConfirmEdit = () => {
+    if (editText.trim().length > 0 && chatContext?.onEditUserMessage !== undefined) {
+      setIsEditing(false);
+      void chatContext.onEditUserMessage(messageId, editText.trim());
+    }
+  };
+
+  const handleCancelEdit = () => {
+    setIsEditing(false);
+  };
+
+  if (isEditing) {
+    return (
+      <MessagePrimitive.Root className="flex justify-end">
+        <div className="flex w-full max-w-[85%] flex-col gap-2">
+          <textarea
+            value={editText}
+            onChange={(e) => { setEditText(e.target.value); }}
+            className="w-full resize-none rounded-2xl px-4 py-3 text-sm shadow-md focus:outline-none"
+            style={{ background: "var(--bg-hover)", color: "var(--fg-primary)", border: "2px solid var(--fg-accent)" }}
+            rows={Math.min(editText.split("\n").length + 1, 8)}
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleConfirmEdit();
+              }
+              if (e.key === "Escape") {
+                handleCancelEdit();
+              }
+            }}
+          />
+          <div className="flex justify-end gap-1">
+            <button
+              type="button"
+              onClick={handleCancelEdit}
+              className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors"
+              style={{ color: "var(--fg-muted)" }}
+            >
+              <X className="h-3 w-3" />
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirmEdit}
+              className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors"
+              style={{ color: "var(--fg-accent)" }}
+            >
+              <Check className="h-3 w-3" />
+              Save & Submit
+            </button>
+          </div>
+        </div>
+      </MessagePrimitive.Root>
+    );
+  }
+
   return (
-    <MessagePrimitive.Root className="flex justify-end">
-      <div
-        className="max-w-[85%] rounded-2xl px-4 py-3 shadow-md"
-        style={{ background: "var(--bg-hover)", color: "var(--fg-primary)" }}
-      >
-        <MessagePrimitive.Content
-          components={{
-            Text: ({ text }) => <Markdown content={text} />,
-          }}
-        />
+    <MessagePrimitive.Root className="group flex justify-end">
+      <div className="flex max-w-[85%] flex-col items-end gap-1">
+        <div
+          className="rounded-2xl px-4 py-3 shadow-md"
+          style={{ background: "var(--bg-hover)", color: "var(--fg-primary)" }}
+        >
+          <MessagePrimitive.Content
+            components={{
+              Text: ({ text }) => <Markdown content={text} />,
+            }}
+          />
+        </div>
+        {chatContext?.isRunning !== true && (
+          <div className="flex opacity-0 transition-opacity group-hover:opacity-100">
+            <button
+              type="button"
+              onClick={handleStartEdit}
+              className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors"
+              style={{ color: "var(--fg-muted)" }}
+              title="Edit message"
+            >
+              <Pencil className="h-3 w-3" />
+              Edit
+            </button>
+          </div>
+        )}
       </div>
     </MessagePrimitive.Root>
   );
@@ -461,7 +566,6 @@ function UserMessage() {
 
 function AssistantMessage() {
   const message = useMessage();
-  const runtime = useThreadRuntime();
   const chatContext = useChatContext();
 
   // Check if message has actual text content
@@ -473,21 +577,12 @@ function AssistantMessage() {
   const custom = message.metadata.custom as { toolInvocations?: ToolInvocation[] } | undefined;
   const hasToolInvocations = (custom?.toolInvocations?.length ?? 0) > 0;
 
-  // Don't render anything if there's no content and no tools (thinking state handled by ChatRunningIndicator)
+  // Don't render anything if there's no content and no tools
   if (!hasTextContent && !hasToolInvocations) {
     return null;
   }
 
-  // Check if this is the last assistant message (for showing regenerate button)
-  const state = runtime.getState();
-  const isLastAssistant = (() => {
-    const assistantMessages = state.messages.filter((m) => m.role === "assistant");
-    if (assistantMessages.length === 0) return false;
-    const lastAssistant = assistantMessages[assistantMessages.length - 1];
-    return lastAssistant?.id === message.id;
-  })();
-
-  const canRegenerate = isLastAssistant && !state.isRunning && chatContext?.onRegenerate !== undefined;
+  const canRegenerate = chatContext?.isRunning !== true && chatContext?.onRegenerateMessage !== undefined;
 
   return (
     <MessagePrimitive.Root className="group flex justify-start">
@@ -500,7 +595,6 @@ function AssistantMessage() {
         </div>
         <div className="flex min-w-0 flex-1 flex-col gap-2 overflow-hidden">
           <MessageErrorBoundary>
-            {/* Only show text bubble if there's actual content */}
             {hasTextContent && (
               <div
                 className="rounded-2xl px-4 py-3 shadow-md"
@@ -515,15 +609,14 @@ function AssistantMessage() {
             )}
             <ToolInvocationsRenderer />
           </MessageErrorBoundary>
-          {/* Regenerate button - only shown on last assistant message when not running */}
           {canRegenerate && (
             <div className="flex opacity-0 transition-opacity group-hover:opacity-100">
               <button
                 type="button"
-                onClick={() => { void chatContext.onRegenerate(); }}
+                onClick={() => { void chatContext.onRegenerateMessage(message.id); }}
                 className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs transition-colors"
                 style={{ color: "var(--fg-muted)" }}
-                title="Regenerate response"
+                title="Regenerate from here"
               >
                 <RotateCcw className="h-3 w-3" />
                 Regenerate

@@ -71,6 +71,7 @@ pub fn run() {
             commands::messages::save_message,
             commands::messages::get_messages,
             commands::messages::delete_message,
+            commands::messages::delete_messages_from,
             credentials::get_credential,
             credentials::set_credential,
             credentials::delete_credential,

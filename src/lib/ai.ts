@@ -50,6 +50,16 @@ export interface EmailConfig {
   emailSslVerify: string | undefined;
 }
 
+const PERSONALITY_KEY = "aios_personality";
+
+export function getPersonality(): string {
+  return localStorage.getItem(PERSONALITY_KEY) ?? "";
+}
+
+export function setPersonality(text: string): void {
+  localStorage.setItem(PERSONALITY_KEY, text);
+}
+
 const DEFAULT_OLLAMA_URL = "http://localhost:11434";
 const DEFAULT_OLLAMA_MODEL = "qwen3-vl:latest";
 
@@ -241,6 +251,7 @@ export interface StreamResult {
   text: string;
   toolInvocations: ToolInvocation[];
   hasToolCalls: boolean;
+  aborted?: boolean;
 }
 
 /**
@@ -275,6 +286,7 @@ export async function streamChatResponse(
 ): Promise<StreamResult> {
   const config = await getProviderConfigAsync();
   const emailConfig = await getEmailConfigAsync();
+  const personality = getPersonality();
 
   // Validate config based on provider
   if (config.provider === "anthropic" && (config.anthropicApiKey === undefined || config.anthropicApiKey === "")) {
@@ -317,6 +329,7 @@ export async function streamChatResponse(
       ollamaBaseUrl: config.ollamaBaseUrl,
       model: config.provider === "ollama" ? config.ollamaModel : undefined,
       enableTools: enableTools && config.enableTools,
+      personality: personality || undefined,
       // Pass email credentials if configured
       emailConfig: emailConfig.emailAddress !== undefined && emailConfig.emailAddress !== ""
         ? {

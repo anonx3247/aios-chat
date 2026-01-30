@@ -7,8 +7,10 @@ import { CommandPalette } from "./CommandPalette";
 import { ThemeSelector } from "./ThemeSelector";
 import { ChatThread } from "@app/components/chat/ChatThread";
 import { AgentTaskPanel } from "@app/components/agent/AgentTaskPanel";
+import { DocumentPanel } from "@app/components/document/DocumentPanel";
 import { useThreads } from "@app/hooks/useThreads";
 import { useAgentSession } from "@app/hooks/useAgentSession";
+import { useDocumentStore } from "@app/stores/document-store";
 
 export function MainLayout() {
   const {
@@ -30,6 +32,7 @@ export function MainLayout() {
 
   // Get agent session for the active thread
   const { session: agentSession } = useAgentSession(activeThreadId);
+  const hasDocument = useDocumentStore((s) => s.document !== null);
 
   // Show task panel when there's an active session and panel is visible
   const hasActiveSession = agentSession !== null;
@@ -190,7 +193,8 @@ export function MainLayout() {
             onInitialMessageConsumed={handleMessageConsumed}
           />
         </div>
-        {showTaskPanel && (
+        {hasDocument && <DocumentPanel />}
+        {showTaskPanel && !hasDocument && (
           <AgentTaskPanel
             threadId={activeThreadId}
             onClose={() => { setIsTaskPanelVisible(false); }}

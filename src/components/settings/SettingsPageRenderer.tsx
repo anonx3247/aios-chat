@@ -1,6 +1,7 @@
 import { ProviderSettingsPage } from "./pages/ProviderSettingsPage";
 import { KeysSettingsPage } from "./pages/KeysSettingsPage";
 import { EmailSettingsPage } from "./pages/EmailSettingsPage";
+import { PersonalitySettingsPage } from "./pages/PersonalitySettingsPage";
 
 interface SettingsPageRendererProps {
   pageId: string;
@@ -13,6 +14,8 @@ export function SettingsPageRenderer({ pageId, subFilter }: SettingsPageRenderer
       return <ProviderSettingsPage />;
     case "settings.keys":
       return <KeysSettingsPage subFilter={subFilter} />;
+    case "settings.personality":
+      return <PersonalitySettingsPage />;
     case "settings.email":
       return <EmailSettingsPage subFilter={subFilter} />;
     default:

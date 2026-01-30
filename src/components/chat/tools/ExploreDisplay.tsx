@@ -7,6 +7,7 @@ import { useState } from "react";
 import { Search, ChevronDown, ChevronRight, Loader2, CheckCircle2 } from "lucide-react";
 import type { ToolInvocation } from "@app/types/message";
 import { Markdown } from "../Markdown";
+import { parseToolResult } from "./parseToolResult";
 
 interface ExploreDisplayProps {
   toolInvocation: ToolInvocation;
@@ -92,7 +93,7 @@ function SubAgentCard({
 export function ExploreDisplay({ toolInvocation }: ExploreDisplayProps) {
   const { state, args, result } = toolInvocation;
   const exploreArgs = args as unknown as ExploreArgs;
-  const exploreResult = result as ExploreResult | undefined;
+  const exploreResult = parseToolResult<ExploreResult>(result);
 
   const prompts = Array.isArray(exploreArgs.prompts) ? exploreArgs.prompts : [];
   const results = exploreResult?.results ?? [];

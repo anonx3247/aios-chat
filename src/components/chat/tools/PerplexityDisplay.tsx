@@ -7,6 +7,7 @@ import { useState } from "react";
 import { Search, BookOpen, Lightbulb, ChevronDown, ChevronUp } from "lucide-react";
 import type { ToolInvocation } from "@app/types/message";
 import { Markdown } from "../Markdown";
+import { parseToolResult } from "./parseToolResult";
 
 interface PerplexityDisplayProps {
   toolInvocation: ToolInvocation;
@@ -55,8 +56,8 @@ export function PerplexityDisplay({ toolInvocation }: PerplexityDisplayProps) {
     );
   }
 
-  // Result state
-  const perplexityResult = result as PerplexityResult | undefined;
+  // Result state — result may be a JSON string from truncateToolResultForContext
+  const perplexityResult = parseToolResult<PerplexityResult>(result);
   const content = perplexityResult?.[resultKey] ?? "";
   const citations = perplexityResult?.citations ?? [];
 

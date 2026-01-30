@@ -159,7 +159,7 @@ app.post("/api/email/test", async (c) => {
 
 app.get("/api/system-prompt", (c) => {
   const hasMCPTools = getMCPConnections().size > 0;
-  return c.json({ prompt: generateSystemPrompt(true, hasMCPTools) });
+  return c.json({ prompt: generateSystemPrompt(true, hasMCPTools, undefined) });
 });
 
 app.get("/api/mcp/status", (c) => {
@@ -218,6 +218,7 @@ app.post("/api/chat", async (c) => {
     ollamaBaseUrl?: string;
     redpillApiKey?: string;
     emailConfig?: EmailConfig;
+    personality?: string;
   }>();
 
   const {
@@ -232,6 +233,7 @@ app.post("/api/chat", async (c) => {
     ollamaBaseUrl = "http://localhost:11434",
     redpillApiKey,
     emailConfig,
+    personality,
   } = body;
 
   // Connect email MCP if needed
@@ -267,7 +269,7 @@ app.post("/api/chat", async (c) => {
       }
     : {};
 
-  const systemPrompt = generateSystemPrompt(!!perplexityApiKey, hasMCPTools);
+  const systemPrompt = generateSystemPrompt(!!perplexityApiKey, hasMCPTools, personality);
 
   // Context management
   const willUseTools = enableTools && Object.keys(allTools).length > 0;

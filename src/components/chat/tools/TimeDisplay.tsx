@@ -70,24 +70,32 @@ export function TimeDisplay({ toolInvocation }: TimeDisplayProps) {
     );
   }
 
+  // Parse result — may be a JSON string from backend truncation
+  const parsed: unknown = (() => {
+    if (typeof result === "string") {
+      try { return JSON.parse(result) as unknown; } catch { return result; }
+    }
+    return result;
+  })();
+
   // Check if result indicates error
   const isError =
-    result !== null &&
-    typeof result === "object" &&
-    ("error" in result || (Array.isArray(result) && result.some((r) => isMCPErrorContent(r))));
+    parsed !== null &&
+    typeof parsed === "object" &&
+    ("error" in parsed || (Array.isArray(parsed) && parsed.some((r) => isMCPErrorContent(r))));
 
   // Extract content from MCP result format
   const getDisplayContent = (): string | null => {
-    if (result === null) return null;
-    if (typeof result === "string") return result;
-    if (Array.isArray(result)) {
-      const textContent = result.find((r): r is MCPTextContent => isMCPTextContent(r));
+    if (parsed === null) return null;
+    if (typeof parsed === "string") return parsed;
+    if (Array.isArray(parsed)) {
+      const textContent = parsed.find((r): r is MCPTextContent => isMCPTextContent(r));
       return textContent?.text ?? null;
     }
-    if (typeof result === "object" && "time" in result) {
-      return String((result as { time: unknown }).time);
+    if (typeof parsed === "object" && "time" in parsed) {
+      return String((parsed as { time: unknown }).time);
     }
-    return JSON.stringify(result, null, 2);
+    return JSON.stringify(parsed, null, 2);
   };
 
   const displayContent = getDisplayContent();
